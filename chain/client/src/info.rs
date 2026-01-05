@@ -33,7 +33,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use sysinfo::{Pid, ProcessExt, System, SystemExt, get_current_pid, set_open_files_limit};
 use time::ext::InstantExt as _;
-use tracing::info;
+use tracing::{debug, info};
 
 const TERAGAS: f64 = 1_000_000_000_000_f64;
 
@@ -452,6 +452,8 @@ impl InfoHelper {
             blocks_info_log,
             machine_info_log,
         );
+        // Log detailed sync status for debugging when syncing
+        Self::log_detailed_sync_status(sync_status, head);
         log_catchup_status(catchup_status);
         if let Some(config_updater) = &config_updater {
             config_updater.report_status();
@@ -629,6 +631,70 @@ impl InfoHelper {
             info.num_blocks_in_processing,
             if self.enable_multiline_logging { blocks_info.to_string() } else { "".to_owned() },
         );
+    }
+
+    /// Log detailed sync status for debugging high CPU usage during sync
+    fn log_detailed_sync_status(sync_status: &SyncStatus, head: &Tip) {
+        match sync_status {
+            SyncStatus::HeaderSync { start_height, current_height, highest_height } => {
+                let headers_downloaded = current_height.saturating_sub(*start_height);
+                let headers_remaining = highest_height.saturating_sub(*current_height);
+                debug!(
+                    target: "sync",
+                    head_height = head.height,
+                    start_height = start_height,
+                    current_header_height = current_height,
+                    highest_height = highest_height,
+                    headers_downloaded = headers_downloaded,
+                    headers_remaining = headers_remaining,
+                    "Header sync progress"
+                );
+            }
+            SyncStatus::BlockSync { start_height, current_height, highest_height } => {
+                let blocks_downloaded = current_height.saturating_sub(*start_height);
+                let blocks_remaining = highest_height.saturating_sub(*current_height);
+                debug!(
+                    target: "sync",
+                    head_height = head.height,
+                    start_height = start_height,
+                    current_block_height = current_height,
+                    highest_height = highest_height,
+                    blocks_downloaded = blocks_downloaded,
+                    blocks_remaining = blocks_remaining,
+                    "Block sync progress"
+                );
+            }
+            SyncStatus::StateSync(status) => {
+                let shards_status: Vec<String> = status
+                    .sync_status
+                    .iter()
+                    .map(|(shard_id, shard_status)| format!("shard {}: {:?}", shard_id, shard_status))
+                    .collect();
+                debug!(
+                    target: "sync",
+                    sync_hash = %status.sync_hash,
+                    shards = ?shards_status,
+                    download_tasks = status.download_tasks.len(),
+                    computation_tasks = status.computation_tasks.len(),
+                    "State sync progress"
+                );
+            }
+            SyncStatus::EpochSync(status) => {
+                debug!(
+                    target: "sync",
+                    status = ?status,
+                    "Epoch sync progress"
+                );
+            }
+            SyncStatus::StateSyncDone | SyncStatus::EpochSyncDone => {
+                debug!(
+                    target: "sync",
+                    status = ?sync_status,
+                    "Sync phase completed, transitioning"
+                );
+            }
+            _ => {}
+        }
     }
 
     // If the `new_sync_requirement` differs from `self.prev_sync_requirement`,

@@ -75,6 +75,17 @@ impl BlockSync {
             tracing::debug_span!(target: "sync", "run_sync", sync_type = "BlockSync").entered();
         let head = chain.head()?;
         let header_head = chain.header_head()?;
+        
+        let blocks_behind = header_head.height.saturating_sub(head.height);
+        debug!(
+            target: "sync",
+            head_height = head.height,
+            header_head_height = header_head.height,
+            blocks_behind = blocks_behind,
+            highest_height = highest_height,
+            num_peers = highest_height_peers.len(),
+            "BlockSync: checking sync status"
+        );
 
         match self.block_sync_due(&head, &header_head) {
             BlockSyncDue::StateSync => {
@@ -82,10 +93,11 @@ impl BlockSync {
                 return Ok(true);
             }
             BlockSyncDue::RequestBlock => {
+                debug!(target: "sync", "BlockSync: requesting blocks");
                 self.block_sync(chain, highest_height_peers, max_block_requests)?;
             }
             BlockSyncDue::WaitForBlock => {
-                // Do nothing.
+                debug!(target: "sync", "BlockSync: waiting for blocks");
             }
         }
 
