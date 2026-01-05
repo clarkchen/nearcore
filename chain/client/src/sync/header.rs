@@ -110,11 +110,24 @@ impl HeaderSync {
         let head = chain.head()?;
         let header_head = chain.header_head()?;
 
+        let headers_behind = highest_height.saturating_sub(header_head.height);
+        debug!(
+            target: "sync",
+            head_height = head.height,
+            header_head_height = header_head.height,
+            highest_height = highest_height,
+            headers_behind = headers_behind,
+            num_peers = highest_height_peers.len(),
+            syncing_peer = ?self.syncing_peer.as_ref().map(|p| &p.peer_info.id),
+            "HeaderSync: checking sync status"
+        );
+
         // Check if we need to start a new request for a batch of header.
         if !self.header_sync_due(sync_status, &header_head, highest_height) {
             // Either
             // * header sync is not needed, or
             // * a request is already in-flight and more progress is expected.
+            debug!(target: "sync", "HeaderSync: not due, waiting for in-flight request");
             return Ok(());
         }
 

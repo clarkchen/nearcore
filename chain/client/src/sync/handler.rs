@@ -89,6 +89,14 @@ impl SyncHandler {
         highest_height_peers: &[HighestHeightPeerInfo],
         apply_chunks_done_sender: Option<ApplyChunksDoneSender>,
     ) -> Option<SyncHandlerRequest> {
+        tracing::debug!(
+            target: "sync",
+            current_status = ?self.sync_status,
+            highest_height = highest_height,
+            num_peers = highest_height_peers.len(),
+            "handle_sync_needed: starting sync step"
+        );
+
         // Run epoch sync first; if this is applicable then nothing else is.
         let epoch_sync_result = self.epoch_sync.run(
             &mut self.sync_status,
@@ -109,6 +117,13 @@ impl SyncHandler {
         // Only body / state sync if header height is close to the latest.
         let chain_header_head = chain.header_head();
         let header_head = unwrap_and_report_state_sync_result!(chain_header_head);
+        
+        tracing::debug!(
+            target: "sync",
+            header_head_height = header_head.height,
+            header_head_hash = %header_head.last_block_hash,
+            "handle_sync_needed: after header sync"
+        );
 
         // We should state sync if it's already started or if we have enough
         // headers and blocks. The should_state_sync method may run block sync.
