@@ -32,9 +32,9 @@ use near_client::gc_actor::GCActor;
 use near_client::spice_chunk_validator_actor::SpiceChunkValidatorActor;
 use near_client::spice_data_distributor_actor::SpiceDataDistributorActor;
 use near_client::{
-    ChunkValidationSenderForPartialWitness, ConfigUpdater, PartialWitnessActor, RpcHandler,
-    RpcHandlerConfig, StartClientResult, StateRequestActor, ViewClientActorInner,
-    spawn_rpc_handler_actor, start_client,
+    BlockSubscriptionConfig, ChunkValidationSenderForPartialWitness, ConfigUpdater,
+    PartialWitnessActor, RpcHandler, RpcHandlerConfig, StartClientResult, StateRequestActor,
+    ViewClientActorInner, spawn_rpc_handler_actor, start_client,
 };
 use near_epoch_manager::EpochManager;
 use near_epoch_manager::EpochManagerAdapter;
@@ -593,6 +593,13 @@ pub async fn start_with_config_and_synchronization_impl(
         &spice_core_writer_adapter,
     );
 
+    // Create block subscription channel for WebSocket push (if RPC is enabled)
+    #[cfg(feature = "json_rpc")]
+    let (block_subscription_sender, block_subscription_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<near_primitives::views::BlockView>();
+    #[cfg(feature = "json_rpc")]
+    let block_subscription_hub = std::sync::Arc::new(near_jsonrpc::BlockSubscriptionHub::default());
+
     let StartClientResult {
         client_actor,
         tx_pool,
@@ -621,6 +628,10 @@ pub async fn start_with_config_and_synchronization_impl(
         None,
         resharding_sender.into_multi_sender(),
         spice_client_config,
+        #[cfg(feature = "json_rpc")]
+        Some(BlockSubscriptionConfig { sender: block_subscription_sender }),
+        #[cfg(not(feature = "json_rpc"))]
+        None,
     );
     client_adapter_for_shards_manager.bind(client_actor.clone());
     client_adapter_for_partial_witness_actor.bind(ChunkValidationSenderForPartialWitness {
@@ -725,6 +736,17 @@ pub async fn start_with_config_and_synchronization_impl(
             hot_store,
             cold_store,
         };
+
+        // Start task to forward blocks from ClientActor to BlockSubscriptionHub
+        let hub_for_forwarder = block_subscription_hub.clone();
+        let mut receiver = block_subscription_receiver;
+        tokio::spawn(async move {
+            while let Some(block) = receiver.recv().await {
+                hub_for_forwarder.publish(block);
+            }
+            tracing::info!(target: "jsonrpc", "Block subscription forwarder stopped");
+        });
+
         near_jsonrpc::start_http(
             rpc_config,
             config.genesis.config.clone(),
@@ -735,6 +757,7 @@ pub async fn start_with_config_and_synchronization_impl(
             #[cfg(feature = "test_features")]
             _gc_actor.into_multi_sender(),
             Arc::new(entity_debug_handler),
+            Some(block_subscription_hub),
             actor_system.new_future_spawner("jsonrpc").as_ref(),
         )
         .await;

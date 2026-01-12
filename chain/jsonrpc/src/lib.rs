@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub use api::{RpcFrom, RpcInto, RpcRequest};
+pub use block_subscription::BlockSubscriptionHub;
 use axum::Router;
 use axum::extract::{Json, Path, Query as AxumQuery, State};
 use axum::http::HeaderValue;
@@ -71,7 +72,9 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info};
 
 mod api;
+pub mod block_subscription;
 mod metrics;
+mod ws;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub struct RpcPollingConfig {
@@ -1710,6 +1713,7 @@ pub fn create_jsonrpc_app(
     peer_manager_sender: PeerManagerSenderForRpc,
     #[cfg(feature = "test_features")] gc_sender: GCSenderForRpc,
     entity_debug_handler: Arc<dyn EntityDebugHandler>,
+    block_subscription_hub: Option<Arc<BlockSubscriptionHub>>,
 ) -> Router {
     let RpcConfig {
         cors_allowed_origins,
@@ -1760,9 +1764,22 @@ pub fn create_jsonrpc_app(
             .route("/debug/pages/{page}", get(display_debug_html));
     }
 
-    app.layer(get_cors(&cors_allowed_origins))
+    let mut final_app = app
+        .layer(get_cors(&cors_allowed_origins))
         .layer(RequestBodyLimitLayer::new(limits_config.json_payload_max_size))
-        .with_state(handler)
+        .with_state(handler);
+
+    // Add WebSocket endpoint for block subscriptions as a separate nested router
+    if let Some(hub) = block_subscription_hub {
+        let ws_state = ws::WsState { hub };
+        let ws_router = Router::new()
+            .route("/ws", get(ws::ws_handler))
+            .with_state(ws_state);
+        final_app = final_app.merge(ws_router);
+        info!(target: "jsonrpc", "WebSocket block subscription enabled at /ws");
+    }
+
+    final_app
 }
 
 /// Starts HTTP server(s) listening for RPC requests.
@@ -1782,6 +1799,7 @@ pub async fn start_http(
     peer_manager_sender: PeerManagerSenderForRpc,
     #[cfg(feature = "test_features")] gc_sender: GCSenderForRpc,
     entity_debug_handler: Arc<dyn EntityDebugHandler>,
+    block_subscription_hub: Option<Arc<BlockSubscriptionHub>>,
     future_spawner: &dyn FutureSpawner,
 ) {
     let addr = config.addr;
@@ -1800,6 +1818,7 @@ pub async fn start_http(
         #[cfg(feature = "test_features")]
         gc_sender,
         entity_debug_handler,
+        block_subscription_hub,
     );
 
     // Bind to socket here, so callers can be sure they can connect once this function returns.

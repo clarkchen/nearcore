@@ -133,6 +133,12 @@ pub struct SpiceClientConfig {
     pub spice_core_writer_sender: Sender<ProcessedBlock>,
 }
 
+/// Configuration for block subscription (WebSocket push).
+pub struct BlockSubscriptionConfig {
+    /// Sender for pushing accepted blocks to WebSocket subscribers.
+    pub sender: tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>,
+}
+
 /// Starts client in a separate tokio runtime (thread).
 pub fn start_client(
     clock: Clock,
@@ -157,6 +163,7 @@ pub fn start_client(
     seed: Option<RngSeed>,
     resharding_sender: ReshardingSender,
     spice_client_config: SpiceClientConfig,
+    block_subscription_config: Option<BlockSubscriptionConfig>,
 ) -> StartClientResult {
     wait_until_genesis(&chain_genesis.time);
 
@@ -241,6 +248,7 @@ pub fn start_client(
         spice_client_config.spice_chunk_validator_sender,
         spice_client_config.spice_data_distributor_sender,
         spice_client_config.spice_core_writer_sender,
+        block_subscription_config.map(|c| c.sender),
     )
     .unwrap();
     let tx_pool = client_actor_inner.client.chunk_producer.sharded_tx_pool.clone();
@@ -327,6 +335,10 @@ pub struct ClientActorInner {
     /// With spice, spice core writer processes all core statements.
     /// Should be noop sender otherwise.
     spice_core_writer_sender: Sender<ProcessedBlock>,
+
+    /// Optional sender for block subscription (WebSocket push).
+    /// When set, newly accepted blocks will be sent through this channel.
+    block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
 }
 
 impl messaging::Actor for ClientActorInner {
@@ -399,6 +411,7 @@ impl ClientActorInner {
         spice_chunk_validator_sender: Sender<ProcessedBlock>,
         spice_data_distributor_sender: Sender<ProcessedBlock>,
         spice_core_writer_sender: Sender<ProcessedBlock>,
+        block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
     ) -> Result<Self, Error> {
         if let Some(vs) = &client.validator_signer.get() {
             info!(target: "client", "Starting validator node: {}", vs.validator_id());
@@ -441,6 +454,7 @@ impl ClientActorInner {
             spice_chunk_validator_sender,
             spice_data_distributor_sender,
             spice_core_writer_sender,
+            block_subscription_sender,
         })
     }
 }
@@ -1564,6 +1578,19 @@ impl ClientActorInner {
             self.spice_chunk_validator_sender.send(ProcessedBlock { block_hash: accepted_block });
             self.spice_data_distributor_sender.send(ProcessedBlock { block_hash: accepted_block });
             self.spice_core_writer_sender.send(ProcessedBlock { block_hash: accepted_block });
+
+            // Push block to WebSocket subscribers
+            if let Some(sender) = &self.block_subscription_sender {
+                if let Ok(block_author) = self.client.epoch_manager.get_block_producer(
+                    block.header().epoch_id(),
+                    block.header().height(),
+                ) {
+                    let block_view =
+                        near_primitives::views::BlockView::from_author_block(block_author, &block);
+                    // Ignore send errors - subscribers may have disconnected
+                    let _ = sender.send(block_view);
+                }
+            }
         }
     }
 

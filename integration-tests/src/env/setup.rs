@@ -228,6 +228,7 @@ fn setup(
             spice_data_distributor_sender: noop().into_sender(),
             spice_core_writer_sender: noop().into_sender(),
         },
+        None, // block_subscription_config
     );
 
     let rpc_handler_config = RpcHandlerConfig {

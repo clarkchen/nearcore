@@ -164,6 +164,7 @@ pub fn create_test_setup_with_accounts_and_validity(
             spice_data_distributor_sender: noop().into_sender(),
             spice_core_writer_sender: noop().into_sender(),
         },
+        None, // block_subscription_config
     );
 
     // 8. Create RpcHandlerActor
@@ -207,6 +208,7 @@ pub fn create_test_setup_with_accounts_and_validity(
         #[cfg(feature = "test_features")]
         noop().into_multi_sender(),
         Arc::new(DummyEntityDebugHandler {}),
+        None, // block_subscription_hub
     );
 
     // 10. Create TestServer with real HTTP transport to get an address
