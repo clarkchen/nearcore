@@ -209,6 +209,7 @@ pub fn create_test_setup_with_accounts_and_validity(
         noop().into_multi_sender(),
         Arc::new(DummyEntityDebugHandler {}),
         None, // block_subscription_hub
+        None, // chunk_subscription_hub
     );
 
     // 10. Create TestServer with real HTTP transport to get an address

@@ -73,11 +73,13 @@ use near_primitives::block_header::ApprovalType;
 use near_primitives::epoch_info::RngSeed;
 use near_primitives::hash::CryptoHash;
 use near_primitives::network::{AnnounceAccount, PeerId};
+use near_primitives::sharding::ShardChunk;
+use near_primitives::stateless_validation::ChunkProductionKey;
 use near_primitives::types::{AccountId, BlockHeight};
 use near_primitives::unwrap_or_return;
 use near_primitives::utils::MaybeValidated;
 use near_primitives::version::{PROTOCOL_VERSION, get_protocol_upgrade_schedule};
-use near_primitives::views::{DetailedDebugStatus, ValidatorInfo};
+use near_primitives::views::{ChunkView, DetailedDebugStatus, ValidatorInfo};
 #[cfg(feature = "test_features")]
 use near_store::DBCol;
 use near_telemetry::TelemetryEvent;
@@ -136,7 +138,9 @@ pub struct SpiceClientConfig {
 /// Configuration for block subscription (WebSocket push).
 pub struct BlockSubscriptionConfig {
     /// Sender for pushing accepted blocks to WebSocket subscribers.
-    pub sender: tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>,
+    pub block_sender: tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>,
+    /// Optional sender for pushing accepted chunks to WebSocket subscribers.
+    pub chunk_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::ChunkView>>,
 }
 
 /// Starts client in a separate tokio runtime (thread).
@@ -234,6 +238,11 @@ pub fn start_client(
         num_chunk_validation_threads,
     );
 
+    let (block_subscription_sender, chunk_subscription_sender) = match block_subscription_config {
+        Some(c) => (Some(c.block_sender), c.chunk_sender),
+        None => (None, None),
+    };
+
     let client_actor_inner = ClientActorInner::new(
         clock,
         client,
@@ -248,7 +257,8 @@ pub fn start_client(
         spice_client_config.spice_chunk_validator_sender,
         spice_client_config.spice_data_distributor_sender,
         spice_client_config.spice_core_writer_sender,
-        block_subscription_config.map(|c| c.sender),
+        block_subscription_sender,
+        chunk_subscription_sender,
     )
     .unwrap();
     let tx_pool = client_actor_inner.client.chunk_producer.sharded_tx_pool.clone();
@@ -338,7 +348,10 @@ pub struct ClientActorInner {
 
     /// Optional sender for block subscription (WebSocket push).
     /// When set, newly accepted blocks will be sent through this channel.
-    block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
+    block_subscription_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
+    /// Optional sender for chunk subscription (WebSocket push).
+    chunk_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<ChunkView>>,
 }
 
 impl messaging::Actor for ClientActorInner {
@@ -411,7 +424,10 @@ impl ClientActorInner {
         spice_chunk_validator_sender: Sender<ProcessedBlock>,
         spice_data_distributor_sender: Sender<ProcessedBlock>,
         spice_core_writer_sender: Sender<ProcessedBlock>,
-        block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
+        block_subscription_sender: Option<
+            tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>,
+        >,
+        chunk_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<ChunkView>>,
     ) -> Result<Self, Error> {
         if let Some(vs) = &client.validator_signer.get() {
             info!(target: "client", "Starting validator node: {}", vs.validator_id());
@@ -455,6 +471,7 @@ impl ClientActorInner {
             spice_data_distributor_sender,
             spice_core_writer_sender,
             block_subscription_sender,
+            chunk_subscription_sender,
         })
     }
 }
@@ -1581,17 +1598,73 @@ impl ClientActorInner {
 
             // Push block to WebSocket subscribers
             if let Some(sender) = &self.block_subscription_sender {
-                if let Ok(block_author) = self.client.epoch_manager.get_block_producer(
-                    block.header().epoch_id(),
-                    block.header().height(),
-                ) {
+                if let Ok(block_author) = self
+                    .client
+                    .epoch_manager
+                    .get_block_producer(block.header().epoch_id(), block.header().height())
+                {
                     let block_view =
                         near_primitives::views::BlockView::from_author_block(block_author, &block);
                     // Ignore send errors - subscribers may have disconnected
                     let _ = sender.send(block_view);
                 }
             }
+
+            // Push chunks to WebSocket subscribers
+            if let Some(sender) = &self.chunk_subscription_sender {
+                for chunk_header in block.chunks().iter_raw() {
+                    match self.build_chunk_view(chunk_header) {
+                        Ok(chunk_view) => {
+                            // Ignore send errors - subscribers may have disconnected
+                            let _ = sender.send(chunk_view);
+                        }
+                        Err(err) => {
+                            tracing::debug!(
+                                target: "client",
+                                ?err,
+                                chunk_hash = ?chunk_header.chunk_hash(),
+                                "Failed to publish chunk to subscribers"
+                            );
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    fn build_chunk_view(
+        &self,
+        chunk_header: &near_primitives::sharding::ShardChunkHeader,
+    ) -> Result<ChunkView, near_chain::Error> {
+        let chunk_hash = chunk_header.chunk_hash().clone();
+        let chunk = self.client.chain.get_chunk(&chunk_hash)?;
+        let chunk = ShardChunk::with_header(ShardChunk::clone(&chunk), chunk_header.clone())
+            .ok_or_else(|| {
+                near_chain::Error::Other(format!(
+                    "Mismatched versions for chunk with hash {}",
+                    chunk_hash.0
+                ))
+            })?;
+
+        let chunk_inner = chunk.cloned_header().take_inner();
+        let epoch_id = self
+            .client
+            .epoch_manager
+            .get_epoch_id_from_prev_block(chunk_inner.prev_block_hash())
+            .into_chain_error()?;
+
+        let author = self
+            .client
+            .epoch_manager
+            .get_chunk_producer_info(&ChunkProductionKey {
+                epoch_id,
+                height_created: chunk_inner.height_created(),
+                shard_id: chunk_inner.shard_id(),
+            })
+            .map(|info| info.take_account_id())
+            .into_chain_error()?;
+
+        Ok(ChunkView::from_author_chunk(author, chunk))
     }
 
     fn receive_headers(&mut self, headers: Vec<Arc<BlockHeader>>, peer_id: PeerId) -> bool {

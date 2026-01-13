@@ -4,8 +4,8 @@
 //! When a new block is processed, it gets broadcast to all connected WebSocket clients.
 
 use near_primitives::views::BlockView;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 
 /// Block subscription hub that manages WebSocket subscriptions.
@@ -27,10 +27,7 @@ impl BlockSubscriptionHub {
     ///                miss blocks if they fall behind by more than this amount.
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Self {
-            sender,
-            subscriber_count: Arc::new(AtomicUsize::new(0)),
-        }
+        Self { sender, subscriber_count: Arc::new(AtomicUsize::new(0)) }
     }
 
     /// Subscribe to receive new blocks.
@@ -43,10 +40,7 @@ impl BlockSubscriptionHub {
             subscriber_count = self.subscriber_count.load(Ordering::Relaxed),
             "New block subscriber"
         );
-        BlockSubscriber {
-            receiver: self.sender.subscribe(),
-            hub: self.clone(),
-        }
+        BlockSubscriber { receiver: self.sender.subscribe(), hub: self.clone() }
     }
 
     /// Publish a new block to all subscribers.
