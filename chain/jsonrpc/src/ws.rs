@@ -214,34 +214,12 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                     None => std::future::pending().await,
                 }
             } => {
-                // Log all received events for debugging
-                tracing::debug!(
-                    target: "jsonrpc",
-                    %subscription_id,
-                    stage = ?event.stage(),
-                    tx_hash = %event.tx_hash(),
-                    receiver_id = %event.receiver_id(),
-                    "Received transaction event"
-                );
-
                 // Check if this event matches our filter
                 if let Some(ref filter) = tx_filter {
-                    let matches = filter.matches(&event);
-                    tracing::debug!(
-                        target: "jsonrpc",
-                        %subscription_id,
-                        stage = ?event.stage(),
-                        tx_hash = %event.tx_hash(),
-                        filter_receiver_id = %filter.receiver_id,
-                        filter_stages = ?filter.stages,
-                        %matches,
-                        "Checking filter match"
-                    );
-
-                    if matches {
+                    if filter.matches(&event) {
                         let response = WsResponse::Transaction { event: &event };
                         if let Ok(json) = serde_json::to_string(&response) {
-                            tracing::info!(
+                            tracing::debug!(
                                 target: "jsonrpc",
                                 %subscription_id,
                                 stage = ?event.stage(),

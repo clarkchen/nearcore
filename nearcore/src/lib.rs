@@ -601,6 +601,10 @@ pub async fn start_with_config_and_synchronization_impl(
     let block_subscription_hub = std::sync::Arc::new(near_jsonrpc::BlockSubscriptionHub::default());
 
     // Create transaction subscription channel and hub for WebSocket push (if RPC is enabled)
+    // NOTE: Temporarily disabled for debugging sync issues. Set to true to enable.
+    #[cfg(feature = "json_rpc")]
+    const ENABLE_TX_SUBSCRIPTION: bool = false;
+    
     #[cfg(feature = "json_rpc")]
     let (transaction_subscription_sender, transaction_subscription_receiver) =
         tokio::sync::mpsc::unbounded_channel::<near_client::TransactionLifecycleEvent>();
@@ -644,7 +648,11 @@ pub async fn start_with_config_and_synchronization_impl(
         #[cfg(not(feature = "json_rpc"))]
         None,
         #[cfg(feature = "json_rpc")]
-        Some(TransactionSubscriptionConfig { sender: transaction_subscription_sender }),
+        if ENABLE_TX_SUBSCRIPTION {
+            Some(TransactionSubscriptionConfig { sender: transaction_subscription_sender })
+        } else {
+            None
+        },
         #[cfg(not(feature = "json_rpc"))]
         None,
     );
@@ -767,53 +775,49 @@ pub async fn start_with_config_and_synchronization_impl(
         });
 
         // Start task to forward transaction events to TransactionSubscriptionHub
-        let tx_hub = transaction_subscription_hub.clone();
-        let mut tx_rx = transaction_subscription_receiver;
-        tokio::spawn(async move {
-            use near_jsonrpc::{ConfirmedTxEvent, ExecutedTxEvent, PendingTxEvent, TransactionLifecycleEvent as TxEvent};
-            tracing::info!(target: "jsonrpc", "Transaction subscription forwarder started");
-            while let Some(event) = tx_rx.recv().await {
-                let (stage, tx_hash, receiver_id) = match &event {
-                    near_client::TransactionLifecycleEvent::Pending { tx_hash, receiver_id, .. } => 
-                        ("Pending", tx_hash.to_string(), receiver_id.to_string()),
-                    near_client::TransactionLifecycleEvent::Confirmed { tx_hash, receiver_id, .. } => 
-                        ("Confirmed", tx_hash.to_string(), receiver_id.to_string()),
-                    near_client::TransactionLifecycleEvent::Executed { tx_hash, receiver_id, .. } => 
-                        ("Executed", tx_hash.to_string(), receiver_id.to_string()),
-                };
-                tracing::debug!(
-                    target: "jsonrpc",
-                    %stage,
-                    %tx_hash,
-                    %receiver_id,
-                    "Forwarder: received event from client"
-                );
+        // Only start if tx subscription is enabled
+        if ENABLE_TX_SUBSCRIPTION {
+            let tx_hub = transaction_subscription_hub.clone();
+            let mut tx_rx = transaction_subscription_receiver;
+            tokio::spawn(async move {
+                use near_jsonrpc::{ConfirmedTxEvent, ExecutedTxEvent, PendingTxEvent, TransactionLifecycleEvent as TxEvent};
+                tracing::info!(target: "jsonrpc", "Transaction subscription forwarder started");
+                while let Some(event) = tx_rx.recv().await {
+                    // Skip processing if no subscribers (avoid unnecessary work)
+                    if tx_hub.subscriber_count() == 0 {
+                        continue;
+                    }
 
-                let jsonrpc_event = match event {
-                    near_client::TransactionLifecycleEvent::Pending {
-                        tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,
-                    } => TxEvent::Pending(PendingTxEvent {
-                        tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,
-                    }),
-                    near_client::TransactionLifecycleEvent::Confirmed {
-                        tx_hash, signer_id, receiver_id, shard_id, height,
-                        chunk_hash, tx_index, transaction, timestamp_ms,
-                    } => TxEvent::Confirmed(ConfirmedTxEvent {
-                        tx_hash, signer_id, receiver_id, shard_id, height,
-                        chunk_hash, tx_index, transaction, timestamp_ms,
-                    }),
-                    near_client::TransactionLifecycleEvent::Executed {
-                        tx_hash, signer_id, receiver_id, block_height, block_hash,
-                        shard_id, outcome, timestamp_ms,
-                    } => TxEvent::Executed(ExecutedTxEvent {
-                        tx_hash, signer_id, receiver_id, block_height, block_hash,
-                        shard_id, outcome, timestamp_ms,
-                    }),
-                };
-                tx_hub.publish(jsonrpc_event);
-            }
-            tracing::info!(target: "jsonrpc", "Transaction subscription forwarder stopped");
-        });
+                    let jsonrpc_event = match event {
+                        near_client::TransactionLifecycleEvent::Pending {
+                            tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,
+                        } => TxEvent::Pending(PendingTxEvent {
+                            tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,
+                        }),
+                        near_client::TransactionLifecycleEvent::Confirmed {
+                            tx_hash, signer_id, receiver_id, shard_id, height,
+                            chunk_hash, tx_index, transaction, timestamp_ms,
+                        } => TxEvent::Confirmed(ConfirmedTxEvent {
+                            tx_hash, signer_id, receiver_id, shard_id, height,
+                            chunk_hash, tx_index, transaction, timestamp_ms,
+                        }),
+                        near_client::TransactionLifecycleEvent::Executed {
+                            tx_hash, signer_id, receiver_id, block_height, block_hash,
+                            shard_id, outcome, timestamp_ms,
+                        } => TxEvent::Executed(ExecutedTxEvent {
+                            tx_hash, signer_id, receiver_id, block_height, block_hash,
+                            shard_id, outcome, timestamp_ms,
+                        }),
+                    };
+                    tx_hub.publish(jsonrpc_event);
+                }
+                tracing::info!(target: "jsonrpc", "Transaction subscription forwarder stopped");
+            });
+        } else {
+            tracing::info!(target: "jsonrpc", "Transaction subscription is DISABLED");
+            // Drop the receiver to avoid unused variable warning
+            drop(transaction_subscription_receiver);
+        }
 
         near_jsonrpc::start_http(
             rpc_config,
