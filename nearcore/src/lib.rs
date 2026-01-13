@@ -600,6 +600,17 @@ pub async fn start_with_config_and_synchronization_impl(
     #[cfg(feature = "json_rpc")]
     let block_subscription_hub = std::sync::Arc::new(near_jsonrpc::BlockSubscriptionHub::default());
 
+    // Create transaction subscription channel and hub for WebSocket push (if RPC is enabled)
+    #[cfg(feature = "json_rpc")]
+    let (transaction_subscription_sender, transaction_subscription_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<near_client::TransactionLifecycleEvent>();
+    // Clone sender for RpcHandler (pending transactions) - both actors share the same channel
+    #[cfg(feature = "json_rpc")]
+    let pending_tx_sender = transaction_subscription_sender.clone();
+    #[cfg(feature = "json_rpc")]
+    let transaction_subscription_hub =
+        std::sync::Arc::new(near_jsonrpc::TransactionSubscriptionHub::default());
+
     let StartClientResult {
         client_actor,
         tx_pool,
@@ -683,6 +694,10 @@ pub async fn start_with_config_and_synchronization_impl(
         config.validator_signer.clone(),
         view_runtime.clone(),
         network_adapter.as_multi_sender(),
+        #[cfg(feature = "json_rpc")]
+        Some(pending_tx_sender),
+        #[cfg(not(feature = "json_rpc"))]
+        None,
     );
 
     let state_sync_dumper = StateSyncDumper {
@@ -747,6 +762,38 @@ pub async fn start_with_config_and_synchronization_impl(
             tracing::info!(target: "jsonrpc", "Block subscription forwarder stopped");
         });
 
+        // Start task to forward transaction events to TransactionSubscriptionHub
+        let tx_hub = transaction_subscription_hub.clone();
+        let mut tx_rx = transaction_subscription_receiver;
+        tokio::spawn(async move {
+            use near_jsonrpc::{ConfirmedTxEvent, ExecutedTxEvent, PendingTxEvent, TransactionLifecycleEvent as TxEvent};
+            while let Some(event) = tx_rx.recv().await {
+                let jsonrpc_event = match event {
+                    near_client::TransactionLifecycleEvent::Pending {
+                        tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,
+                    } => TxEvent::Pending(PendingTxEvent {
+                        tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,
+                    }),
+                    near_client::TransactionLifecycleEvent::Confirmed {
+                        tx_hash, signer_id, receiver_id, shard_id, height,
+                        chunk_hash, tx_index, transaction, timestamp_ms,
+                    } => TxEvent::Confirmed(ConfirmedTxEvent {
+                        tx_hash, signer_id, receiver_id, shard_id, height,
+                        chunk_hash, tx_index, transaction, timestamp_ms,
+                    }),
+                    near_client::TransactionLifecycleEvent::Executed {
+                        tx_hash, signer_id, receiver_id, block_height, block_hash,
+                        shard_id, outcome, timestamp_ms,
+                    } => TxEvent::Executed(ExecutedTxEvent {
+                        tx_hash, signer_id, receiver_id, block_height, block_hash,
+                        shard_id, outcome, timestamp_ms,
+                    }),
+                };
+                tx_hub.publish(jsonrpc_event);
+            }
+            tracing::info!(target: "jsonrpc", "Transaction subscription forwarder stopped");
+        });
+
         near_jsonrpc::start_http(
             rpc_config,
             config.genesis.config.clone(),
@@ -758,6 +805,7 @@ pub async fn start_with_config_and_synchronization_impl(
             _gc_actor.into_multi_sender(),
             Arc::new(entity_debug_handler),
             Some(block_subscription_hub),
+            Some(transaction_subscription_hub),
             actor_system.new_future_spawner("jsonrpc").as_ref(),
         )
         .await;

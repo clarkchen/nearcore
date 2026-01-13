@@ -1,9 +1,12 @@
-//! WebSocket handler for real-time block subscriptions.
+//! WebSocket handler for real-time block and transaction subscriptions.
 //!
 //! This module provides WebSocket endpoints for clients to subscribe to
-//! real-time block updates without polling.
+//! real-time block updates and transaction lifecycle events without polling.
 
 use crate::block_subscription::BlockSubscriptionHub;
+use crate::transaction_subscription::{
+    TransactionLifecycleEvent, TransactionStage, TransactionSubscriptionHub,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -12,8 +15,10 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
+use near_primitives::types::AccountId;
 use near_primitives::views::BlockView;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// WebSocket request message from client
@@ -26,6 +31,17 @@ pub enum WsRequest {
     /// Unsubscribe from blocks
     #[serde(rename = "unsubscribe_blocks")]
     UnsubscribeBlocks,
+    /// Subscribe to transaction lifecycle events for a specific receiver_id
+    #[serde(rename = "subscribe_transactions")]
+    SubscribeTransactions {
+        receiver_id: AccountId,
+        /// Which stages to subscribe to (defaults to all if empty)
+        #[serde(default)]
+        stages: Vec<TransactionStage>,
+    },
+    /// Unsubscribe from transaction events
+    #[serde(rename = "unsubscribe_transactions")]
+    UnsubscribeTransactions,
     /// Ping to keep connection alive
     #[serde(rename = "ping")]
     Ping,
@@ -38,6 +54,13 @@ pub enum WsResponse<'a> {
     /// Subscription confirmed
     #[serde(rename = "subscribed")]
     Subscribed { subscription_id: &'a str },
+    /// Transaction subscription confirmed
+    #[serde(rename = "tx_subscribed")]
+    TxSubscribed {
+        subscription_id: &'a str,
+        receiver_id: &'a AccountId,
+        stages: &'a [TransactionStage],
+    },
     /// Unsubscription confirmed
     #[serde(rename = "unsubscribed")]
     Unsubscribed,
@@ -47,6 +70,11 @@ pub enum WsResponse<'a> {
         block: &'a BlockView,
         /// Timestamp when the block was received by this node (unix millis)
         received_at: u64,
+    },
+    /// Transaction lifecycle event
+    #[serde(rename = "transaction")]
+    Transaction {
+        event: &'a TransactionLifecycleEvent,
     },
     /// Pong response
     #[serde(rename = "pong")]
@@ -71,14 +99,18 @@ pub async fn ws_handler(
 }
 
 /// Handle an individual WebSocket connection
-async fn handle_socket(socket: WebSocket, hub: Arc<BlockSubscriptionHub>) {
+async fn handle_socket(socket: WebSocket, state: WsState) {
     let (mut sender, mut receiver) = socket.split();
 
     // Generate a unique subscription ID
     let subscription_id = format!("{:016x}", rand::random::<u64>());
 
     // Subscribe to block updates
-    let mut block_subscriber = hub.subscribe();
+    let mut block_subscriber = state.block_hub.subscribe();
+
+    // Optional transaction subscription
+    let mut tx_subscriber = state.tx_hub.as_ref().map(|hub| hub.subscribe());
+    let mut tx_filter: Option<TxSubscriptionFilter> = None;
 
     // Send subscription confirmation
     let response = WsResponse::Subscribed {
@@ -131,6 +163,31 @@ async fn handle_socket(socket: WebSocket, hub: Arc<BlockSubscriptionHub>) {
                 }
             }
 
+            // Receive transaction event and push to client (if subscribed)
+            Some(event) = async {
+                match tx_subscriber.as_mut() {
+                    Some(sub) => sub.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                // Check if this event matches our filter
+                if let Some(ref filter) = tx_filter {
+                    if filter.matches(&event) {
+                        let response = WsResponse::Transaction { event: &event };
+                        if let Ok(json) = serde_json::to_string(&response) {
+                            if sender.send(Message::Text(json.into())).await.is_err() {
+                                tracing::debug!(
+                                    target: "jsonrpc",
+                                    %subscription_id,
+                                    "Failed to send tx event, client disconnected"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Handle messages from client
             msg = receiver.next() => {
                 match msg {
@@ -151,10 +208,51 @@ async fn handle_socket(socket: WebSocket, hub: Arc<BlockSubscriptionHub>) {
                                     }
                                 }
                                 WsRequest::SubscribeBlocks => {
-                                    // Already subscribed, just confirm
                                     let response = WsResponse::Subscribed {
                                         subscription_id: &subscription_id,
                                     };
+                                    if let Ok(json) = serde_json::to_string(&response) {
+                                        let _ = sender.send(Message::Text(json.into())).await;
+                                    }
+                                }
+                                WsRequest::SubscribeTransactions { receiver_id, stages } => {
+                                    if state.tx_hub.is_some() {
+                                        let stages_set: HashSet<_> = stages.iter().copied().collect();
+                                        let stages_vec: Vec<_> = if stages_set.is_empty() {
+                                            vec![TransactionStage::Pending, TransactionStage::Confirmed, TransactionStage::Executed]
+                                        } else {
+                                            stages_set.iter().copied().collect()
+                                        };
+                                        tx_filter = Some(TxSubscriptionFilter {
+                                            receiver_id: receiver_id.clone(),
+                                            stages: stages_set,
+                                        });
+                                        let response = WsResponse::TxSubscribed {
+                                            subscription_id: &subscription_id,
+                                            receiver_id: &receiver_id,
+                                            stages: &stages_vec,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                        tracing::info!(
+                                            target: "jsonrpc",
+                                            %subscription_id,
+                                            %receiver_id,
+                                            "WebSocket client subscribed to transactions"
+                                        );
+                                    } else {
+                                        let response = WsResponse::Error {
+                                            message: "Transaction subscription not enabled",
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                    }
+                                }
+                                WsRequest::UnsubscribeTransactions => {
+                                    tx_filter = None;
+                                    let response = WsResponse::Unsubscribed;
                                     if let Ok(json) = serde_json::to_string(&response) {
                                         let _ = sender.send(Message::Text(json.into())).await;
                                     }

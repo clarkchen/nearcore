@@ -67,6 +67,7 @@ pub fn spawn_rpc_handler_actor(
     validator_signer: MutableValidatorSigner,
     runtime: Arc<dyn RuntimeAdapter>,
     network_adapter: PeerManagerAdapter,
+    pending_tx_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::client_actor::TransactionLifecycleEvent>>,
 ) -> MultithreadRuntimeHandle<RpcHandler> {
     let actor = RpcHandler::new(
         config.clone(),
@@ -77,6 +78,7 @@ pub fn spawn_rpc_handler_actor(
         validator_signer,
         runtime,
         network_adapter,
+        pending_tx_sender,
     );
     actor_system.spawn_multithread_actor(config.handler_threads, move || actor.clone())
 }
@@ -106,6 +108,7 @@ pub struct RpcHandler {
     validator_signer: MutableValidatorSigner,
     runtime: Arc<dyn RuntimeAdapter>,
     network_adapter: PeerManagerAdapter,
+    pending_tx_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::client_actor::TransactionLifecycleEvent>>,
 }
 
 impl RpcHandler {
@@ -118,6 +121,7 @@ impl RpcHandler {
         validator_signer: MutableValidatorSigner,
         runtime: Arc<dyn RuntimeAdapter>,
         network_adapter: PeerManagerAdapter,
+        pending_tx_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::client_actor::TransactionLifecycleEvent>>,
     ) -> Self {
         let chain_store = runtime.store().chain_store();
 
@@ -131,6 +135,7 @@ impl RpcHandler {
             runtime,
             shard_tracker,
             network_adapter,
+            pending_tx_sender,
         }
     }
 
@@ -241,6 +246,23 @@ impl RpcHandler {
                 match pool.insert_transaction(shard_uid, validated_tx) {
                     InsertTransactionResult::Success => {
                         tracing::trace!(target: "client", ?shard_uid, tx_hash = ?signed_tx.get_hash(), "Recorded a transaction.");
+                        // Publish pending transaction event
+                        if let Some(ref sender) = self.pending_tx_sender {
+                            let event = crate::client_actor::TransactionLifecycleEvent::Pending {
+                                tx_hash: signed_tx.get_hash(),
+                                signer_id: signed_tx.transaction.signer_id().clone(),
+                                receiver_id: signed_tx.transaction.receiver_id().clone(),
+                                actions: signed_tx.transaction.actions().iter()
+                                    .map(|a| near_primitives::views::ActionView::from(a.clone()))
+                                    .collect(),
+                                nonce: signed_tx.transaction.nonce(),
+                                timestamp_ms: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64,
+                            };
+                            let _ = sender.send(event);
+                        }
                     }
                     InsertTransactionResult::Duplicate => {
                         tracing::trace!(target: "client", ?shard_uid, tx_hash = ?signed_tx.get_hash(), "Duplicate transaction, not forwarding it.");

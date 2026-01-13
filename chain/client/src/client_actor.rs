@@ -139,6 +139,46 @@ pub struct BlockSubscriptionConfig {
     pub sender: tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>,
 }
 
+/// Transaction lifecycle event for subscription (mirrors TransactionLifecycleEvent in jsonrpc).
+#[derive(Debug, Clone)]
+pub enum TransactionLifecycleEvent {
+    Pending {
+        tx_hash: near_primitives::hash::CryptoHash,
+        signer_id: near_primitives::types::AccountId,
+        receiver_id: near_primitives::types::AccountId,
+        actions: Vec<near_primitives::views::ActionView>,
+        nonce: u64,
+        timestamp_ms: u64,
+    },
+    Confirmed {
+        tx_hash: near_primitives::hash::CryptoHash,
+        signer_id: near_primitives::types::AccountId,
+        receiver_id: near_primitives::types::AccountId,
+        shard_id: near_primitives::types::ShardId,
+        height: near_primitives::types::BlockHeight,
+        chunk_hash: near_primitives::hash::CryptoHash,
+        tx_index: usize,
+        transaction: near_primitives::views::SignedTransactionView,
+        timestamp_ms: u64,
+    },
+    Executed {
+        tx_hash: near_primitives::hash::CryptoHash,
+        signer_id: near_primitives::types::AccountId,
+        receiver_id: near_primitives::types::AccountId,
+        block_height: near_primitives::types::BlockHeight,
+        block_hash: near_primitives::hash::CryptoHash,
+        shard_id: near_primitives::types::ShardId,
+        outcome: near_primitives::views::ExecutionOutcomeWithIdView,
+        timestamp_ms: u64,
+    },
+}
+
+/// Configuration for transaction subscription (WebSocket push).
+pub struct TransactionSubscriptionConfig {
+    /// Sender for pushing transaction events to WebSocket subscribers.
+    pub sender: tokio::sync::mpsc::UnboundedSender<TransactionLifecycleEvent>,
+}
+
 /// Starts client in a separate tokio runtime (thread).
 pub fn start_client(
     clock: Clock,
@@ -249,6 +289,7 @@ pub fn start_client(
         spice_client_config.spice_data_distributor_sender,
         spice_client_config.spice_core_writer_sender,
         block_subscription_config.map(|c| c.sender),
+        transaction_subscription_config.map(|c| c.sender),
     )
     .unwrap();
     let tx_pool = client_actor_inner.client.chunk_producer.sharded_tx_pool.clone();
@@ -339,6 +380,10 @@ pub struct ClientActorInner {
     /// Optional sender for block subscription (WebSocket push).
     /// When set, newly accepted blocks will be sent through this channel.
     block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
+
+    /// Optional sender for transaction lifecycle subscription (WebSocket push).
+    /// When set, transaction events will be sent through this channel.
+    transaction_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<TransactionLifecycleEvent>>,
 }
 
 impl messaging::Actor for ClientActorInner {
@@ -412,6 +457,7 @@ impl ClientActorInner {
         spice_data_distributor_sender: Sender<ProcessedBlock>,
         spice_core_writer_sender: Sender<ProcessedBlock>,
         block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::BlockView>>,
+        transaction_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<TransactionLifecycleEvent>>,
     ) -> Result<Self, Error> {
         if let Some(vs) = &client.validator_signer.get() {
             info!(target: "client", "Starting validator node: {}", vs.validator_id());
@@ -455,6 +501,7 @@ impl ClientActorInner {
             spice_data_distributor_sender,
             spice_core_writer_sender,
             block_subscription_sender,
+            transaction_subscription_sender,
         })
     }
 }
@@ -2027,6 +2074,33 @@ impl Handler<SpanWrapped<ShardsManagerResponse>> for ClientActorInner {
                     tag_chunk_distribution = true,
                 )
                 .entered();
+
+                // Publish transaction events if we have a full shard_chunk and subscription is enabled
+                if let (Some(ref chunk), Some(ref sender)) = (&shard_chunk, &self.transaction_subscription_sender) {
+                    let timestamp_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    let shard_id = partial_chunk.shard_id();
+                    let height = partial_chunk.height_created();
+                    let chunk_hash = partial_chunk.chunk_hash().0;
+
+                    for (tx_index, tx) in chunk.transactions().iter().enumerate() {
+                        let event = TransactionLifecycleEvent::Confirmed {
+                            tx_hash: tx.get_hash(),
+                            signer_id: tx.transaction.signer_id().clone(),
+                            receiver_id: tx.transaction.receiver_id().clone(),
+                            shard_id,
+                            height,
+                            chunk_hash,
+                            tx_index,
+                            transaction: near_primitives::views::SignedTransactionView::from(tx.clone()),
+                            timestamp_ms,
+                        };
+                        let _ = sender.send(event);
+                    }
+                }
+
                 self.client.on_chunk_completed(
                     partial_chunk,
                     shard_chunk,
