@@ -31,7 +31,7 @@ pub enum WsRequest {
     /// Unsubscribe from blocks
     #[serde(rename = "unsubscribe_blocks")]
     UnsubscribeBlocks,
-    /// Subscribe to transaction lifecycle events for a specific receiver_id
+    /// Subscribe to transaction lifecycle events for a specific receiver_id (all stages)
     #[serde(rename = "subscribe_transactions")]
     SubscribeTransactions {
         receiver_id: AccountId,
@@ -39,6 +39,15 @@ pub enum WsRequest {
         #[serde(default)]
         stages: Vec<TransactionStage>,
     },
+    /// Subscribe to PENDING transactions only (simplified for debugging)
+    #[serde(rename = "subscribe_pending_transactions")]
+    SubscribePendingTransactions { receiver_id: AccountId },
+    /// Subscribe to CONFIRMED transactions only (simplified for debugging)
+    #[serde(rename = "subscribe_confirmed_transactions")]
+    SubscribeConfirmedTransactions { receiver_id: AccountId },
+    /// Subscribe to EXECUTED transactions only (simplified for debugging)
+    #[serde(rename = "subscribe_executed_transactions")]
+    SubscribeExecutedTransactions { receiver_id: AccountId },
     /// Unsubscribe from transaction events
     #[serde(rename = "unsubscribe_transactions")]
     UnsubscribeTransactions,
@@ -60,6 +69,24 @@ pub enum WsResponse<'a> {
         subscription_id: &'a str,
         receiver_id: &'a AccountId,
         stages: &'a [TransactionStage],
+    },
+    /// Pending transaction subscription confirmed (simplified mode)
+    #[serde(rename = "pending_tx_subscribed")]
+    PendingTxSubscribed {
+        subscription_id: &'a str,
+        receiver_id: &'a AccountId,
+    },
+    /// Confirmed transaction subscription confirmed (simplified mode)
+    #[serde(rename = "confirmed_tx_subscribed")]
+    ConfirmedTxSubscribed {
+        subscription_id: &'a str,
+        receiver_id: &'a AccountId,
+    },
+    /// Executed transaction subscription confirmed (simplified mode)
+    #[serde(rename = "executed_tx_subscribed")]
+    ExecutedTxSubscribed {
+        subscription_id: &'a str,
+        receiver_id: &'a AccountId,
     },
     /// Unsubscription confirmed
     #[serde(rename = "unsubscribed")]
@@ -187,11 +214,40 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                     None => std::future::pending().await,
                 }
             } => {
+                // Log all received events for debugging
+                tracing::debug!(
+                    target: "jsonrpc",
+                    %subscription_id,
+                    stage = ?event.stage(),
+                    tx_hash = %event.tx_hash(),
+                    receiver_id = %event.receiver_id(),
+                    "Received transaction event"
+                );
+
                 // Check if this event matches our filter
                 if let Some(ref filter) = tx_filter {
-                    if filter.matches(&event) {
+                    let matches = filter.matches(&event);
+                    tracing::debug!(
+                        target: "jsonrpc",
+                        %subscription_id,
+                        stage = ?event.stage(),
+                        tx_hash = %event.tx_hash(),
+                        filter_receiver_id = %filter.receiver_id,
+                        filter_stages = ?filter.stages,
+                        %matches,
+                        "Checking filter match"
+                    );
+
+                    if matches {
                         let response = WsResponse::Transaction { event: &event };
                         if let Ok(json) = serde_json::to_string(&response) {
+                            tracing::info!(
+                                target: "jsonrpc",
+                                %subscription_id,
+                                stage = ?event.stage(),
+                                tx_hash = %event.tx_hash(),
+                                "Sending transaction event to client"
+                            );
                             if sender.send(Message::Text(json.into())).await.is_err() {
                                 tracing::debug!(
                                     target: "jsonrpc",
@@ -257,6 +313,99 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                                             %subscription_id,
                                             %receiver_id,
                                             "WebSocket client subscribed to transactions"
+                                        );
+                                    } else {
+                                        let response = WsResponse::Error {
+                                            message: "Transaction subscription not enabled",
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                    }
+                                }
+                                // Simplified subscription: PENDING only
+                                WsRequest::SubscribePendingTransactions { receiver_id } => {
+                                    if has_tx_hub {
+                                        let mut stages_set = HashSet::new();
+                                        stages_set.insert(TransactionStage::Pending);
+                                        tx_filter = Some(TxSubscriptionFilter {
+                                            receiver_id: receiver_id.clone(),
+                                            stages: stages_set,
+                                        });
+                                        let response = WsResponse::PendingTxSubscribed {
+                                            subscription_id: &subscription_id,
+                                            receiver_id: &receiver_id,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                        tracing::info!(
+                                            target: "jsonrpc",
+                                            %subscription_id,
+                                            %receiver_id,
+                                            "WebSocket client subscribed to PENDING transactions only"
+                                        );
+                                    } else {
+                                        let response = WsResponse::Error {
+                                            message: "Transaction subscription not enabled",
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                    }
+                                }
+                                // Simplified subscription: CONFIRMED only
+                                WsRequest::SubscribeConfirmedTransactions { receiver_id } => {
+                                    if has_tx_hub {
+                                        let mut stages_set = HashSet::new();
+                                        stages_set.insert(TransactionStage::Confirmed);
+                                        tx_filter = Some(TxSubscriptionFilter {
+                                            receiver_id: receiver_id.clone(),
+                                            stages: stages_set,
+                                        });
+                                        let response = WsResponse::ConfirmedTxSubscribed {
+                                            subscription_id: &subscription_id,
+                                            receiver_id: &receiver_id,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                        tracing::info!(
+                                            target: "jsonrpc",
+                                            %subscription_id,
+                                            %receiver_id,
+                                            "WebSocket client subscribed to CONFIRMED transactions only"
+                                        );
+                                    } else {
+                                        let response = WsResponse::Error {
+                                            message: "Transaction subscription not enabled",
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                    }
+                                }
+                                // Simplified subscription: EXECUTED only
+                                WsRequest::SubscribeExecutedTransactions { receiver_id } => {
+                                    if has_tx_hub {
+                                        let mut stages_set = HashSet::new();
+                                        stages_set.insert(TransactionStage::Executed);
+                                        tx_filter = Some(TxSubscriptionFilter {
+                                            receiver_id: receiver_id.clone(),
+                                            stages: stages_set,
+                                        });
+                                        let response = WsResponse::ExecutedTxSubscribed {
+                                            subscription_id: &subscription_id,
+                                            receiver_id: &receiver_id,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&response) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
+                                        tracing::info!(
+                                            target: "jsonrpc",
+                                            %subscription_id,
+                                            %receiver_id,
+                                            "WebSocket client subscribed to EXECUTED transactions only"
                                         );
                                     } else {
                                         let response = WsResponse::Error {

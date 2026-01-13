@@ -771,7 +771,24 @@ pub async fn start_with_config_and_synchronization_impl(
         let mut tx_rx = transaction_subscription_receiver;
         tokio::spawn(async move {
             use near_jsonrpc::{ConfirmedTxEvent, ExecutedTxEvent, PendingTxEvent, TransactionLifecycleEvent as TxEvent};
+            tracing::info!(target: "jsonrpc", "Transaction subscription forwarder started");
             while let Some(event) = tx_rx.recv().await {
+                let (stage, tx_hash, receiver_id) = match &event {
+                    near_client::TransactionLifecycleEvent::Pending { tx_hash, receiver_id, .. } => 
+                        ("Pending", tx_hash.to_string(), receiver_id.to_string()),
+                    near_client::TransactionLifecycleEvent::Confirmed { tx_hash, receiver_id, .. } => 
+                        ("Confirmed", tx_hash.to_string(), receiver_id.to_string()),
+                    near_client::TransactionLifecycleEvent::Executed { tx_hash, receiver_id, .. } => 
+                        ("Executed", tx_hash.to_string(), receiver_id.to_string()),
+                };
+                tracing::debug!(
+                    target: "jsonrpc",
+                    %stage,
+                    %tx_hash,
+                    %receiver_id,
+                    "Forwarder: received event from client"
+                );
+
                 let jsonrpc_event = match event {
                     near_client::TransactionLifecycleEvent::Pending {
                         tx_hash, signer_id, receiver_id, actions, nonce, timestamp_ms,

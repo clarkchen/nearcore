@@ -120,16 +120,43 @@ impl TransactionSubscriptionHub {
     }
 
     pub fn publish(&self, event: TransactionLifecycleEvent) {
-        if self.subscriber_count.load(Ordering::Relaxed) == 0 {
+        let subscriber_count = self.subscriber_count.load(Ordering::Relaxed);
+        
+        // Log all events for debugging (even if no subscribers)
+        tracing::debug!(
+            target: "jsonrpc",
+            stage = ?event.stage(),
+            tx_hash = %event.tx_hash(),
+            receiver_id = %event.receiver_id(),
+            subscriber_count,
+            "TransactionSubscriptionHub: publishing event"
+        );
+
+        if subscriber_count == 0 {
+            tracing::trace!(
+                target: "jsonrpc",
+                stage = ?event.stage(),
+                tx_hash = %event.tx_hash(),
+                "No subscribers, skipping publish"
+            );
             return;
         }
         let event = Arc::new(event);
-        if let Ok(count) = self.sender.send(event) {
-            tracing::trace!(
-                target: "jsonrpc",
-                receivers = count,
-                "Published transaction event"
-            );
+        match self.sender.send(event) {
+            Ok(count) => {
+                tracing::debug!(
+                    target: "jsonrpc",
+                    receivers = count,
+                    "Published transaction event to subscribers"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "jsonrpc",
+                    error = ?e,
+                    "Failed to publish transaction event"
+                );
+            }
         }
     }
 
