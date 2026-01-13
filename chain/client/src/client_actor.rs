@@ -204,6 +204,7 @@ pub fn start_client(
     resharding_sender: ReshardingSender,
     spice_client_config: SpiceClientConfig,
     block_subscription_config: Option<BlockSubscriptionConfig>,
+    transaction_subscription_config: Option<TransactionSubscriptionConfig>,
 ) -> StartClientResult {
     wait_until_genesis(&chain_genesis.time);
 
@@ -2076,7 +2077,7 @@ impl Handler<SpanWrapped<ShardsManagerResponse>> for ClientActorInner {
                 .entered();
 
                 // Publish transaction events if we have a full shard_chunk and subscription is enabled
-                if let (Some(ref chunk), Some(ref sender)) = (&shard_chunk, &self.transaction_subscription_sender) {
+                if let (Some(chunk), Some(sender)) = (&shard_chunk, &self.transaction_subscription_sender) {
                     let timestamp_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -2085,7 +2086,7 @@ impl Handler<SpanWrapped<ShardsManagerResponse>> for ClientActorInner {
                     let height = partial_chunk.height_created();
                     let chunk_hash = partial_chunk.chunk_hash().0;
 
-                    for (tx_index, tx) in chunk.transactions().iter().enumerate() {
+                    for (tx_index, tx) in chunk.to_transactions().iter().enumerate() {
                         let event = TransactionLifecycleEvent::Confirmed {
                             tx_hash: tx.get_hash(),
                             signer_id: tx.transaction.signer_id().clone(),

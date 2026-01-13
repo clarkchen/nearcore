@@ -84,10 +84,26 @@ pub enum WsResponse<'a> {
     Error { message: &'a str },
 }
 
+/// Filter for transaction subscription
+#[derive(Clone)]
+pub struct TxSubscriptionFilter {
+    pub receiver_id: AccountId,
+    pub stages: HashSet<TransactionStage>,
+}
+
+impl TxSubscriptionFilter {
+    /// Check if an event matches this filter
+    pub fn matches(&self, event: &TransactionLifecycleEvent) -> bool {
+        event.receiver_id() == &self.receiver_id
+            && (self.stages.is_empty() || self.stages.contains(&event.stage()))
+    }
+}
+
 /// State shared with WebSocket handlers
 #[derive(Clone)]
 pub struct WsState {
-    pub hub: Arc<BlockSubscriptionHub>,
+    pub block_hub: Arc<BlockSubscriptionHub>,
+    pub tx_hub: Option<Arc<TransactionSubscriptionHub>>,
 }
 
 /// Axum handler for WebSocket upgrade
@@ -95,7 +111,7 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<WsState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.hub))
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 /// Handle an individual WebSocket connection
@@ -111,6 +127,7 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
     // Optional transaction subscription
     let mut tx_subscriber = state.tx_hub.as_ref().map(|hub| hub.subscribe());
     let mut tx_filter: Option<TxSubscriptionFilter> = None;
+    let has_tx_hub = state.tx_hub.is_some();
 
     // Send subscription confirmation
     let response = WsResponse::Subscribed {
@@ -216,7 +233,7 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                                     }
                                 }
                                 WsRequest::SubscribeTransactions { receiver_id, stages } => {
-                                    if state.tx_hub.is_some() {
+                                    if has_tx_hub {
                                         let stages_set: HashSet<_> = stages.iter().copied().collect();
                                         let stages_vec: Vec<_> = if stages_set.is_empty() {
                                             vec![TransactionStage::Pending, TransactionStage::Confirmed, TransactionStage::Executed]

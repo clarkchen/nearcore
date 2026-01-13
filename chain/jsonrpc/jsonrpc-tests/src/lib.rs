@@ -165,6 +165,7 @@ pub fn create_test_setup_with_accounts_and_validity(
             spice_core_writer_sender: noop().into_sender(),
         },
         None, // block_subscription_config
+        None, // transaction_subscription_config
     );
 
     // 8. Create RpcHandlerActor
@@ -185,6 +186,7 @@ pub fn create_test_setup_with_accounts_and_validity(
         signer,
         runtime,
         noop().into_multi_sender(),
+        None, // pending_tx_sender
     );
 
     // 9. Create Axum Router
@@ -209,6 +211,7 @@ pub fn create_test_setup_with_accounts_and_validity(
         noop().into_multi_sender(),
         Arc::new(DummyEntityDebugHandler {}),
         None, // block_subscription_hub
+        None, // transaction_subscription_hub
     );
 
     // 10. Create TestServer with real HTTP transport to get an address

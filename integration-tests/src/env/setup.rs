@@ -229,6 +229,7 @@ fn setup(
             spice_core_writer_sender: noop().into_sender(),
         },
         None, // block_subscription_config
+        None, // transaction_subscription_config
     );
 
     let rpc_handler_config = RpcHandlerConfig {
@@ -248,6 +249,7 @@ fn setup(
         signer,
         runtime,
         network_adapter.clone(),
+        None, // pending_tx_sender
     );
 
     let validator_signer = Some(Arc::new(EmptyValidatorSigner::new(account_id)));
@@ -616,6 +618,7 @@ pub fn setup_tx_request_handler(
         client.validator_signer.clone(),
         runtime,
         network_adapter,
+        None, // pending_tx_sender
     )
 }
 

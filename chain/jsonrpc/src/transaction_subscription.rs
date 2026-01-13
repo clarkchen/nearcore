@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Transaction lifecycle stages
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransactionStage {
     Pending,

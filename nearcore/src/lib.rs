@@ -34,7 +34,7 @@ use near_client::spice_data_distributor_actor::SpiceDataDistributorActor;
 use near_client::{
     BlockSubscriptionConfig, ChunkValidationSenderForPartialWitness, ConfigUpdater,
     PartialWitnessActor, RpcHandler, RpcHandlerConfig, StartClientResult, StateRequestActor,
-    ViewClientActorInner, spawn_rpc_handler_actor, start_client,
+    TransactionSubscriptionConfig, ViewClientActorInner, spawn_rpc_handler_actor, start_client,
 };
 use near_epoch_manager::EpochManager;
 use near_epoch_manager::EpochManagerAdapter;
@@ -641,6 +641,10 @@ pub async fn start_with_config_and_synchronization_impl(
         spice_client_config,
         #[cfg(feature = "json_rpc")]
         Some(BlockSubscriptionConfig { sender: block_subscription_sender }),
+        #[cfg(not(feature = "json_rpc"))]
+        None,
+        #[cfg(feature = "json_rpc")]
+        Some(TransactionSubscriptionConfig { sender: transaction_subscription_sender }),
         #[cfg(not(feature = "json_rpc"))]
         None,
     );
