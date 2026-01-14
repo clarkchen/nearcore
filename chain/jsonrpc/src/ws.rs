@@ -3,8 +3,8 @@
 //! This module provides WebSocket endpoints for clients to subscribe to
 //! real-time block and chunk updates without polling.
 
-use crate::block_subscription::BlockSubscriptionHub;
-use crate::chunk_subscription::{ChunkSubscriptionHub, ChunkSubscriber};
+use crate::block_subscription::{BlockPushView, BlockSubscriptionHub};
+use crate::chunk_subscription::{ChunkSubscriber, ChunkSubscriptionHub};
 use axum::{
     extract::{
         State,
@@ -14,10 +14,32 @@ use axum::{
 };
 use futures::{Sink, SinkExt, StreamExt, future};
 use near_primitives::types::AccountId;
-use near_primitives::views::{BlockView, ChunkView};
+use near_primitives::views::{BlockHeaderView, ChunkView};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+#[derive(Debug, Serialize)]
+pub struct BlockOut {
+    header: BlockHeaderView,
+    chunks: Vec<ChunkOut>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChunkOut {
+    chunk_hash: near_primitives::sharding::ChunkHash,
+    shard_id: near_primitives::types::ShardId,
+    transactions: Vec<TxOut>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TxOut {
+    hash: near_primitives::hash::CryptoHash,
+    receiver_id: AccountId,
+    signer_id: AccountId,
+    actions: Vec<near_primitives::views::ActionView>,
+    status: near_primitives::views::ExecutionStatusView,
+}
 
 /// WebSocket request message from client
 #[derive(Debug, Deserialize)]
@@ -25,7 +47,7 @@ use std::sync::Arc;
 pub enum WsRequest {
     /// Subscribe to new blocks
     #[serde(rename = "subscribe_blocks")]
-    SubscribeBlocks,
+    SubscribeBlocks { receiver_ids: Vec<AccountId> },
     /// Unsubscribe from blocks
     #[serde(rename = "unsubscribe_blocks")]
     UnsubscribeBlocks,
@@ -59,7 +81,7 @@ pub enum WsResponse<'a> {
     /// New block notification
     #[serde(rename = "block")]
     Block {
-        block: &'a BlockView,
+        block: BlockOut,
         /// Timestamp when the block was received by this node (unix millis)
         received_at: u64,
     },
@@ -103,6 +125,7 @@ async fn handle_socket(
 
     // Subscribe to block updates
     let mut block_subscriber = block_hub.subscribe();
+    let mut block_filters: HashSet<AccountId> = HashSet::new();
     // Lazily create chunk subscriber when requested
     let mut chunk_subscriber: Option<ChunkSubscriber> = None;
     let mut chunk_filters: HashSet<AccountId> = HashSet::new();
@@ -125,33 +148,32 @@ async fn handle_socket(
         tokio::select! {
             // Receive new block and push to client
             Some(block) = block_subscriber.recv() => {
-                let received_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
+                if let Some(filtered) = build_filtered_block(&block, &block_filters) {
+                    let received_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
 
-                let response = WsResponse::Block {
-                    block: &block,
-                    received_at,
-                };
+                    let response = WsResponse::Block { block: filtered, received_at };
 
-                match serde_json::to_string(&response) {
-                    Ok(json) => {
-                        if sender.send(Message::Text(json.into())).await.is_err() {
-                            tracing::debug!(
-                                target: "jsonrpc",
-                                %subscription_id,
-                                "Failed to send block, client disconnected"
-                            );
-                            break;
+                    match serde_json::to_string(&response) {
+                        Ok(json) => {
+                            if sender.send(Message::Text(json.into())).await.is_err() {
+                                tracing::debug!(
+                                    target: "jsonrpc",
+                                    %subscription_id,
+                                    "Failed to send block, client disconnected"
+                                );
+                                break;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "jsonrpc",
-                            ?e,
-                            "Failed to serialize block"
-                        );
+                        Err(e) => {
+                            tracing::error!(
+                                target: "jsonrpc",
+                                ?e,
+                                "Failed to serialize block"
+                            );
+                        }
                     }
                 }
             }
@@ -213,11 +235,10 @@ async fn handle_socket(
                                         let _ = sender.send(Message::Text(json.into())).await;
                                     }
                                 }
-                                WsRequest::SubscribeBlocks => {
-                                    // Already subscribed, just confirm
-                                    let response = WsResponse::Subscribed {
-                                        subscription_id: &subscription_id,
-                                    };
+                                WsRequest::SubscribeBlocks { receiver_ids } => {
+                                    block_filters = receiver_ids.into_iter().collect();
+                                    let response =
+                                        WsResponse::Subscribed { subscription_id: &subscription_id };
                                     if let Ok(json) = serde_json::to_string(&response) {
                                         let _ = sender.send(Message::Text(json.into())).await;
                                     }
@@ -339,4 +360,67 @@ async fn send_error(sender: &mut (impl Sink<Message> + Unpin), message: &'static
     if let Ok(json) = serde_json::to_string(&WsResponse::Error { message }) {
         let _ = sender.send(Message::Text(json.into())).await;
     }
+}
+
+fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> Option<BlockOut> {
+    // If no filters, pass-through
+    if filters.is_empty() {
+        let chunks: Vec<_> = block
+            .chunks
+            .iter()
+            .map(|c| ChunkOut {
+                chunk_hash: c.chunk_hash.clone(),
+                shard_id: c.shard_id,
+                transactions: c
+                    .transactions
+                    .iter()
+                    .map(|t| TxOut {
+                        hash: t.hash,
+                        receiver_id: t.receiver_id.clone(),
+                        signer_id: t.signer_id.clone(),
+                        actions: t.actions.clone(),
+                        status: t.status.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        if chunks.is_empty() {
+            return None;
+        }
+        return Some(BlockOut { header: block.header.clone(), chunks });
+    }
+
+    let mut chunks_out = Vec::new();
+    for chunk in &block.chunks {
+        let receipt_hit = chunk.receipts.iter().any(|r| filters.contains(&r.receiver_id));
+
+        let mut txs_out = Vec::new();
+        for tx in &chunk.transactions {
+            if filters.contains(&tx.receiver_id) || receipt_hit {
+                txs_out.push(TxOut {
+                    hash: tx.hash,
+                    receiver_id: tx.receiver_id.clone(),
+                    signer_id: tx.signer_id.clone(),
+                    actions: tx.actions.clone(),
+                    status: tx.status.clone(),
+                });
+            }
+        }
+
+        if txs_out.is_empty() {
+            continue;
+        }
+
+        chunks_out.push(ChunkOut {
+            chunk_hash: chunk.chunk_hash.clone(),
+            shard_id: chunk.shard_id,
+            transactions: txs_out,
+        });
+    }
+
+    if chunks_out.is_empty() {
+        return None;
+    }
+
+    Some(BlockOut { header: block.header.clone(), chunks: chunks_out })
 }

@@ -1349,6 +1349,33 @@ impl From<GlobalContractIdentifierView> for GlobalContractIdentifier {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct BlockPushView {
+    pub header: BlockHeaderView,
+    pub chunks: Vec<ChunkPushView>,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct ChunkPushView {
+    pub chunk_hash: ChunkHash,
+    pub shard_id: ShardId,
+    pub transactions: Vec<TxPushView>,
+    pub receipts: Vec<ReceiptView>,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct TxPushView {
+    pub hash: CryptoHash,
+    pub receiver_id: AccountId,
+    pub signer_id: AccountId,
+    pub actions: Vec<ActionView>,
+    pub status: ExecutionStatusView,
+    pub raw: SignedTransactionView,
+}
+
 #[serde_as]
 #[derive(
     BorshSerialize,

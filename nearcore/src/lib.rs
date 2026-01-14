@@ -596,7 +596,7 @@ pub async fn start_with_config_and_synchronization_impl(
     // Create block subscription channel for WebSocket push (if RPC is enabled)
     #[cfg(feature = "json_rpc")]
     let (block_subscription_sender, block_subscription_receiver) =
-        tokio::sync::mpsc::unbounded_channel::<near_primitives::views::BlockView>();
+        tokio::sync::mpsc::unbounded_channel::<near_primitives::views::BlockPushView>();
     #[cfg(feature = "json_rpc")]
     let (chunk_subscription_sender, chunk_subscription_receiver) =
         tokio::sync::mpsc::unbounded_channel::<near_primitives::views::ChunkView>();

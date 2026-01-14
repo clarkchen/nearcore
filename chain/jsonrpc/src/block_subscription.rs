@@ -3,7 +3,7 @@
 //! This module provides a publish-subscribe mechanism for real-time block updates.
 //! When a new block is processed, it gets broadcast to all connected WebSocket clients.
 
-use near_primitives::views::BlockView;
+pub use near_primitives::views::{BlockPushView, ChunkPushView, TxPushView};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::broadcast;
@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub struct BlockSubscriptionHub {
     /// Broadcast sender for distributing blocks to all subscribers
-    sender: broadcast::Sender<Arc<BlockView>>,
+    sender: broadcast::Sender<Arc<BlockPushView>>,
     /// Current number of active subscribers (for metrics)
     subscriber_count: Arc<AtomicUsize>,
 }
@@ -47,7 +47,7 @@ impl BlockSubscriptionHub {
     ///
     /// This is a non-blocking operation. If there are no subscribers,
     /// the block is simply discarded.
-    pub fn publish(&self, block: BlockView) {
+    pub fn publish(&self, block: BlockPushView) {
         let subscriber_count = self.subscriber_count.load(Ordering::Relaxed);
         if subscriber_count == 0 {
             return;
@@ -94,7 +94,7 @@ impl Default for BlockSubscriptionHub {
 ///
 /// When dropped, automatically decrements the subscriber count.
 pub struct BlockSubscriber {
-    receiver: broadcast::Receiver<Arc<BlockView>>,
+    receiver: broadcast::Receiver<Arc<BlockPushView>>,
     hub: BlockSubscriptionHub,
 }
 
@@ -103,7 +103,7 @@ impl BlockSubscriber {
     ///
     /// Returns None if the channel is closed (hub dropped).
     /// Blocks that were missed due to slow processing are skipped.
-    pub async fn recv(&mut self) -> Option<Arc<BlockView>> {
+    pub async fn recv(&mut self) -> Option<Arc<BlockPushView>> {
         loop {
             match self.receiver.recv().await {
                 Ok(block) => return Some(block),

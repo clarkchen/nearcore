@@ -8,7 +8,7 @@ use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-pub use block_subscription::BlockSubscriptionHub;
+pub use block_subscription::{BlockSubscriptionHub};
 pub use chunk_subscription::ChunkSubscriptionHub;
 use near_async::futures::{FutureSpawner, FutureSpawnerExt};
 use near_async::instrumentation::all_actor_instrumentations_view;
