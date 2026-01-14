@@ -371,40 +371,9 @@ async fn send_error(sender: &mut (impl Sink<Message> + Unpin), message: &'static
 }
 
 fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> Option<BlockOut> {
-    // If no filters, pass-through
+    // If no filters provided, do not push anything (avoid noisy defaults)
     if filters.is_empty() {
-        let chunks: Vec<_> = block
-            .chunks
-            .iter()
-            .map(|c| ChunkOut {
-                chunk_hash: c.chunk_hash.clone(),
-                shard_id: c.shard_id,
-                transactions: c
-                    .transactions
-                    .iter()
-                    .map(|t| TxOut {
-                        hash: t.hash,
-                        receiver_id: t.receiver_id.clone(),
-                        signer_id: t.signer_id.clone(),
-                        actions: t.actions.clone(),
-                        status: t.status.clone(),
-                    })
-                    .collect(),
-                receipts: c
-                    .receipts
-                    .iter()
-                    .map(|r| ReceiptOut {
-                        receipt_id: r.receipt.receipt_id,
-                        receiver_id: r.receipt.receiver_id.clone(),
-                        status: r.status.clone(),
-                    })
-                    .collect(),
-            })
-            .collect();
-        if chunks.is_empty() {
-            return None;
-        }
-        return Some(BlockOut { header: block.header.clone(), chunks });
+        return None;
     }
 
     let mut chunks_out = Vec::new();
@@ -421,13 +390,11 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
             })
             .collect();
 
-        let receipt_hit = !receipts_out.is_empty();
-
-        // Filter transactions
+        // Filter transactions strictly by receiver_id
         let txs_out: Vec<_> = chunk
             .transactions
             .iter()
-            .filter(|tx| filters.contains(&tx.receiver_id) || receipt_hit)
+            .filter(|tx| filters.contains(&tx.receiver_id))
             .map(|tx| TxOut {
                 hash: tx.hash,
                 receiver_id: tx.receiver_id.clone(),
