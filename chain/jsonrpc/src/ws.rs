@@ -409,31 +409,33 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
 
     let mut chunks_out = Vec::new();
     for chunk in &block.chunks {
-        let receipt_hit = chunk.receipts.iter().any(|r| filters.contains(&r.receipt.receiver_id));
+        // Filter receipts first
+        let receipts_out: Vec<_> = chunk
+            .receipts
+            .iter()
+            .filter(|r| filters.contains(&r.receipt.receiver_id))
+            .map(|r| ReceiptOut {
+                receipt_id: r.receipt.receipt_id,
+                receiver_id: r.receipt.receiver_id.clone(),
+                status: r.status.clone(),
+            })
+            .collect();
 
-        let mut txs_out = Vec::new();
-        for tx in &chunk.transactions {
-            if filters.contains(&tx.receiver_id) || receipt_hit {
-                txs_out.push(TxOut {
-                    hash: tx.hash,
-                    receiver_id: tx.receiver_id.clone(),
-                    signer_id: tx.signer_id.clone(),
-                    actions: tx.actions.clone(),
-                    status: tx.status.clone(),
-                });
-            }
-        }
+        let receipt_hit = !receipts_out.is_empty();
 
-        let mut receipts_out = Vec::new();
-        for r in &chunk.receipts {
-            if filters.contains(&r.receipt.receiver_id) {
-                receipts_out.push(ReceiptOut {
-                    receipt_id: r.receipt.receipt_id,
-                    receiver_id: r.receipt.receiver_id.clone(),
-                    status: r.status.clone(),
-                });
-            }
-        }
+        // Filter transactions
+        let txs_out: Vec<_> = chunk
+            .transactions
+            .iter()
+            .filter(|tx| filters.contains(&tx.receiver_id) || receipt_hit)
+            .map(|tx| TxOut {
+                hash: tx.hash,
+                receiver_id: tx.receiver_id.clone(),
+                signer_id: tx.signer_id.clone(),
+                actions: tx.actions.clone(),
+                status: tx.status.clone(),
+            })
+            .collect();
 
         if txs_out.is_empty() && receipts_out.is_empty() {
             continue;
