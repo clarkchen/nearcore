@@ -30,6 +30,7 @@ pub struct ChunkOut {
     chunk_hash: near_primitives::sharding::ChunkHash,
     shard_id: near_primitives::types::ShardId,
     transactions: Vec<TxOut>,
+    receipts: Vec<ReceiptOut>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,6 +39,13 @@ pub struct TxOut {
     receiver_id: AccountId,
     signer_id: AccountId,
     actions: Vec<near_primitives::views::ActionView>,
+    status: near_primitives::views::ExecutionStatusView,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReceiptOut {
+    receipt_id: near_primitives::hash::CryptoHash,
+    receiver_id: AccountId,
     status: near_primitives::views::ExecutionStatusView,
 }
 
@@ -382,6 +390,15 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
                         status: t.status.clone(),
                     })
                     .collect(),
+                receipts: c
+                    .receipts
+                    .iter()
+                    .map(|r| ReceiptOut {
+                        receipt_id: r.receipt.receipt_id,
+                        receiver_id: r.receipt.receiver_id.clone(),
+                        status: r.status.clone(),
+                    })
+                    .collect(),
             })
             .collect();
         if chunks.is_empty() {
@@ -392,7 +409,7 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
 
     let mut chunks_out = Vec::new();
     for chunk in &block.chunks {
-        let receipt_hit = chunk.receipts.iter().any(|r| filters.contains(&r.receiver_id));
+        let receipt_hit = chunk.receipts.iter().any(|r| filters.contains(&r.receipt.receiver_id));
 
         let mut txs_out = Vec::new();
         for tx in &chunk.transactions {
@@ -407,7 +424,18 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
             }
         }
 
-        if txs_out.is_empty() {
+        let mut receipts_out = Vec::new();
+        for r in &chunk.receipts {
+            if filters.contains(&r.receipt.receiver_id) {
+                receipts_out.push(ReceiptOut {
+                    receipt_id: r.receipt.receipt_id,
+                    receiver_id: r.receipt.receiver_id.clone(),
+                    status: r.status.clone(),
+                });
+            }
+        }
+
+        if txs_out.is_empty() && receipts_out.is_empty() {
             continue;
         }
 
@@ -415,6 +443,7 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
             chunk_hash: chunk.chunk_hash.clone(),
             shard_id: chunk.shard_id,
             transactions: txs_out,
+            receipts: receipts_out,
         });
     }
 

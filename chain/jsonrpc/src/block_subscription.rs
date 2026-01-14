@@ -3,7 +3,9 @@
 //! This module provides a publish-subscribe mechanism for real-time block updates.
 //! When a new block is processed, it gets broadcast to all connected WebSocket clients.
 
-pub use near_primitives::views::{BlockPushView, ChunkPushView, TxPushView};
+pub use near_primitives::views::{
+    BlockPushView, ChunkPushView, ReceiptWithOutcomeView, TxPushView,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::broadcast;

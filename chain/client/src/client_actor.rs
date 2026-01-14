@@ -80,8 +80,8 @@ use near_primitives::unwrap_or_return;
 use near_primitives::utils::MaybeValidated;
 use near_primitives::version::{PROTOCOL_VERSION, get_protocol_upgrade_schedule};
 use near_primitives::views::{
-    BlockPushView, ChunkPushView, ChunkView, DetailedDebugStatus, ExecutionStatusView,
-    SignedTransactionView, TxPushView, ValidatorInfo,
+    BlockPushView, ChunkPushView, ChunkView, DetailedDebugStatus, ExecutionStatusView, ReceiptView,
+    ReceiptWithOutcomeView, SignedTransactionView, TxPushView, ValidatorInfo,
 };
 #[cfg(feature = "test_features")]
 use near_store::DBCol;
@@ -1680,6 +1680,23 @@ impl ClientActorInner {
                     continue;
                 }
             };
+            let incoming_receipts = match self
+                .client
+                .chain
+                .chain_store()
+                .get_incoming_receipts(&block.hash(), shard_id)
+            {
+                Ok(proofs) => proofs,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "client",
+                        ?err,
+                        ?chunk_hash,
+                        "Failed to load incoming receipts for block push"
+                    );
+                    Arc::new(Vec::new())
+                }
+            };
 
             let mut transactions_out = Vec::new();
             for tx in chunk.to_transactions().iter() {
@@ -1706,8 +1723,20 @@ impl ClientActorInner {
                 });
             }
 
-            let receipts_out: Vec<_> =
-                chunk.prev_outgoing_receipts().iter().cloned().map(Into::into).collect();
+            let receipts_out: Vec<_> = incoming_receipts
+                .iter()
+                .flat_map(|proof| proof.0.iter())
+                .map(|r| {
+                    let status = self
+                        .client
+                        .chain
+                        .get_execution_outcome(r.receipt_id())
+                        .map(|o| o.outcome_with_id.outcome.status.into())
+                        .unwrap_or(ExecutionStatusView::Unknown);
+                    let receipt_view: ReceiptView = r.clone().into();
+                    ReceiptWithOutcomeView { receipt: receipt_view, status }
+                })
+                .collect();
 
             // Skip empty chunks (no transactions, no receipts)
             if transactions_out.is_empty() && receipts_out.is_empty() {

@@ -1362,7 +1362,7 @@ pub struct ChunkPushView {
     pub chunk_hash: ChunkHash,
     pub shard_id: ShardId,
     pub transactions: Vec<TxPushView>,
-    pub receipts: Vec<ReceiptView>,
+    pub receipts: Vec<ReceiptWithOutcomeView>,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1374,6 +1374,13 @@ pub struct TxPushView {
     pub actions: Vec<ActionView>,
     pub status: ExecutionStatusView,
     pub raw: SignedTransactionView,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct ReceiptWithOutcomeView {
+    pub receipt: ReceiptView,
+    pub status: ExecutionStatusView,
 }
 
 #[serde_as]
