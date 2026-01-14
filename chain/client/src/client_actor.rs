@@ -80,8 +80,8 @@ use near_primitives::unwrap_or_return;
 use near_primitives::utils::MaybeValidated;
 use near_primitives::version::{PROTOCOL_VERSION, get_protocol_upgrade_schedule};
 use near_primitives::views::{
-    BlockPushView, ChunkPushView, ChunkView, DetailedDebugStatus, ExecutionStatusView, ReceiptView,
-    ReceiptWithOutcomeView, SignedTransactionView, TxPushView, ValidatorInfo,
+    BlockPushView, ChunkView, DetailedDebugStatus, ExecutionStatusView, SignedTransactionView,
+    TxPushView, ValidatorInfo,
 };
 #[cfg(feature = "test_features")]
 use near_store::DBCol;
@@ -142,8 +142,6 @@ pub struct SpiceClientConfig {
 pub struct BlockSubscriptionConfig {
     /// Sender for pushing accepted blocks to WebSocket subscribers.
     pub block_sender: tokio::sync::mpsc::UnboundedSender<BlockPushView>,
-    /// Optional sender for pushing accepted chunks to WebSocket subscribers.
-    pub chunk_sender: Option<tokio::sync::mpsc::UnboundedSender<near_primitives::views::ChunkView>>,
 }
 
 /// Starts client in a separate tokio runtime (thread).
@@ -241,10 +239,7 @@ pub fn start_client(
         num_chunk_validation_threads,
     );
 
-    let (block_subscription_sender, chunk_subscription_sender) = match block_subscription_config {
-        Some(c) => (Some(c.block_sender), c.chunk_sender),
-        None => (None, None),
-    };
+    let block_subscription_sender = block_subscription_config.map(|c| c.block_sender);
 
     let client_actor_inner = ClientActorInner::new(
         clock,
@@ -261,7 +256,6 @@ pub fn start_client(
         spice_client_config.spice_data_distributor_sender,
         spice_client_config.spice_core_writer_sender,
         block_subscription_sender,
-        chunk_subscription_sender,
     )
     .unwrap();
     let tx_pool = client_actor_inner.client.chunk_producer.sharded_tx_pool.clone();
@@ -352,8 +346,6 @@ pub struct ClientActorInner {
     /// Optional sender for block subscription (WebSocket push).
     /// When set, newly accepted blocks will be sent through this channel.
     block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<BlockPushView>>,
-    /// Optional sender for chunk subscription (WebSocket push).
-    chunk_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<ChunkView>>,
 }
 
 impl messaging::Actor for ClientActorInner {
@@ -427,7 +419,6 @@ impl ClientActorInner {
         spice_data_distributor_sender: Sender<ProcessedBlock>,
         spice_core_writer_sender: Sender<ProcessedBlock>,
         block_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<BlockPushView>>,
-        chunk_subscription_sender: Option<tokio::sync::mpsc::UnboundedSender<ChunkView>>,
     ) -> Result<Self, Error> {
         if let Some(vs) = &client.validator_signer.get() {
             info!(target: "client", "Starting validator node: {}", vs.validator_id());
@@ -471,7 +462,6 @@ impl ClientActorInner {
             spice_data_distributor_sender,
             spice_core_writer_sender,
             block_subscription_sender,
-            chunk_subscription_sender,
         })
     }
 }
@@ -1603,26 +1593,6 @@ impl ClientActorInner {
                     let _ = sender.send(block_push);
                 }
             }
-
-            // Push chunks to WebSocket subscribers
-            if let Some(sender) = &self.chunk_subscription_sender {
-                for chunk_header in block.chunks().iter_raw() {
-                    match self.build_chunk_view(chunk_header) {
-                        Ok(chunk_view) => {
-                            // Ignore send errors - subscribers may have disconnected
-                            let _ = sender.send(chunk_view);
-                        }
-                        Err(err) => {
-                            tracing::debug!(
-                                target: "client",
-                                ?err,
-                                chunk_hash = ?chunk_header.chunk_hash(),
-                                "Failed to publish chunk to subscribers"
-                            );
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1662,12 +1632,10 @@ impl ClientActorInner {
     }
 
     fn build_block_push_view(&self, block: &Block) -> Option<BlockPushView> {
-        let header_view: near_primitives::views::BlockHeaderView = block.header().into();
-        let mut chunks_out = Vec::new();
+        let mut transactions_out = Vec::new();
 
         for chunk_header in block.chunks().iter_raw() {
             let chunk_hash = chunk_header.chunk_hash().clone();
-            let shard_id = chunk_header.shard_id();
             let chunk = match self.client.chain.get_chunk(&chunk_hash) {
                 Ok(c) => c,
                 Err(err) => {
@@ -1680,25 +1648,7 @@ impl ClientActorInner {
                     continue;
                 }
             };
-            let incoming_receipts = match self
-                .client
-                .chain
-                .chain_store()
-                .get_incoming_receipts(&block.hash(), shard_id)
-            {
-                Ok(proofs) => proofs,
-                Err(err) => {
-                    tracing::debug!(
-                        target: "client",
-                        ?err,
-                        ?chunk_hash,
-                        "Failed to load incoming receipts for block push"
-                    );
-                    Arc::new(Vec::new())
-                }
-            };
 
-            let mut transactions_out = Vec::new();
             for tx in chunk.to_transactions().iter() {
                 let hash = tx.get_hash();
                 let receiver_id = tx.transaction.receiver_id().clone();
@@ -1722,40 +1672,13 @@ impl ClientActorInner {
                     raw,
                 });
             }
-
-            let receipts_out: Vec<_> = incoming_receipts
-                .iter()
-                .flat_map(|proof| proof.0.iter())
-                .map(|r| {
-                    let status = self
-                        .client
-                        .chain
-                        .get_execution_outcome(r.receipt_id())
-                        .map(|o| o.outcome_with_id.outcome.status.into())
-                        .unwrap_or(ExecutionStatusView::Unknown);
-                    let receipt_view: ReceiptView = r.clone().into();
-                    ReceiptWithOutcomeView { receipt: receipt_view, status }
-                })
-                .collect();
-
-            // Skip empty chunks (no transactions, no receipts)
-            if transactions_out.is_empty() && receipts_out.is_empty() {
-                continue;
-            }
-
-            chunks_out.push(ChunkPushView {
-                chunk_hash,
-                shard_id,
-                transactions: transactions_out,
-                receipts: receipts_out,
-            });
         }
 
-        if chunks_out.is_empty() {
+        if transactions_out.is_empty() {
             return None;
         }
 
-        Some(BlockPushView { header: header_view, chunks: chunks_out })
+        Some(BlockPushView { height: block.header().height(), transactions: transactions_out })
     }
 
     fn receive_headers(&mut self, headers: Vec<Arc<BlockHeader>>, peer_id: PeerId) -> bool {

@@ -598,12 +598,7 @@ pub async fn start_with_config_and_synchronization_impl(
     let (block_subscription_sender, block_subscription_receiver) =
         tokio::sync::mpsc::unbounded_channel::<near_primitives::views::BlockPushView>();
     #[cfg(feature = "json_rpc")]
-    let (chunk_subscription_sender, chunk_subscription_receiver) =
-        tokio::sync::mpsc::unbounded_channel::<near_primitives::views::ChunkView>();
-    #[cfg(feature = "json_rpc")]
     let block_subscription_hub = std::sync::Arc::new(near_jsonrpc::BlockSubscriptionHub::default());
-    #[cfg(feature = "json_rpc")]
-    let chunk_subscription_hub = std::sync::Arc::new(near_jsonrpc::ChunkSubscriptionHub::default());
 
     let StartClientResult {
         client_actor,
@@ -634,10 +629,7 @@ pub async fn start_with_config_and_synchronization_impl(
         resharding_sender.into_multi_sender(),
         spice_client_config,
         #[cfg(feature = "json_rpc")]
-        Some(BlockSubscriptionConfig {
-            block_sender: block_subscription_sender,
-            chunk_sender: Some(chunk_subscription_sender),
-        }),
+        Some(BlockSubscriptionConfig { block_sender: block_subscription_sender }),
         #[cfg(not(feature = "json_rpc"))]
         None,
     );
@@ -755,16 +747,6 @@ pub async fn start_with_config_and_synchronization_impl(
             tracing::info!(target: "jsonrpc", "Block subscription forwarder stopped");
         });
 
-        // Start task to forward chunks from ClientActor to ChunkSubscriptionHub
-        let chunk_hub_for_forwarder = chunk_subscription_hub.clone();
-        let mut chunk_receiver = chunk_subscription_receiver;
-        tokio::spawn(async move {
-            while let Some(chunk) = chunk_receiver.recv().await {
-                chunk_hub_for_forwarder.publish(chunk);
-            }
-            tracing::info!(target: "jsonrpc", "Chunk subscription forwarder stopped");
-        });
-
         near_jsonrpc::start_http(
             rpc_config,
             config.genesis.config.clone(),
@@ -776,7 +758,6 @@ pub async fn start_with_config_and_synchronization_impl(
             _gc_actor.into_multi_sender(),
             Arc::new(entity_debug_handler),
             Some(block_subscription_hub),
-            Some(chunk_subscription_hub),
             actor_system.new_future_spawner("jsonrpc").as_ref(),
         )
         .await;

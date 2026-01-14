@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Chunk subscription hub for WebSocket clients.
 //!
 //! Provides a lightweight publish-subscribe mechanism to stream chunk updates

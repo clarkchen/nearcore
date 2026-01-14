@@ -240,7 +240,14 @@ impl RpcHandler {
                 let mut pool = self.tx_pool.lock();
                 match pool.insert_transaction(shard_uid, validated_tx) {
                     InsertTransactionResult::Success => {
-                        tracing::trace!(target: "client", ?shard_uid, tx_hash = ?signed_tx.get_hash(), "Recorded a transaction.");
+                        let tx_hash = signed_tx.get_hash();
+                        tracing::trace!(target: "client", ?shard_uid, tx_hash = ?tx_hash, "Recorded a transaction.");
+                        tracing::info!(
+                            target: "client",
+                            ?tx_hash,
+                            receiver_id = %signed_tx.transaction.receiver_id(),
+                            "Pending tx accepted into pool"
+                        );
                     }
                     InsertTransactionResult::Duplicate => {
                         tracing::trace!(target: "client", ?shard_uid, tx_hash = ?signed_tx.get_hash(), "Duplicate transaction, not forwarding it.");

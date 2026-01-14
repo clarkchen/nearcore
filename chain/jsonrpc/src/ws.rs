@@ -1,10 +1,9 @@
-//! WebSocket handler for real-time block and chunk subscriptions.
+//! WebSocket handler for real-time block subscriptions.
 //!
 //! This module provides WebSocket endpoints for clients to subscribe to
-//! real-time block and chunk updates without polling.
+//! real-time block updates without polling.
 
 use crate::block_subscription::{BlockPushView, BlockSubscriptionHub};
-use crate::chunk_subscription::{ChunkSubscriber, ChunkSubscriptionHub};
 use axum::{
     extract::{
         State,
@@ -12,25 +11,16 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures::{Sink, SinkExt, StreamExt, future};
-use near_primitives::types::AccountId;
-use near_primitives::views::{BlockHeaderView, ChunkView};
+use futures::{Sink, SinkExt, StreamExt};
+use near_primitives::types::{AccountId, BlockHeight};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub struct BlockOut {
-    header: BlockHeaderView,
-    chunks: Vec<ChunkOut>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ChunkOut {
-    chunk_hash: near_primitives::sharding::ChunkHash,
-    shard_id: near_primitives::types::ShardId,
+    height: BlockHeight,
     transactions: Vec<TxOut>,
-    receipts: Vec<ReceiptOut>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,13 +29,6 @@ pub struct TxOut {
     receiver_id: AccountId,
     signer_id: AccountId,
     actions: Vec<near_primitives::views::ActionView>,
-    status: near_primitives::views::ExecutionStatusView,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ReceiptOut {
-    receipt_id: near_primitives::hash::CryptoHash,
-    receiver_id: AccountId,
     status: near_primitives::views::ExecutionStatusView,
 }
 
@@ -59,12 +42,6 @@ pub enum WsRequest {
     /// Unsubscribe from blocks
     #[serde(rename = "unsubscribe_blocks")]
     UnsubscribeBlocks,
-    /// Subscribe to chunks filtered by receiver ids
-    #[serde(rename = "subscribe_chunks")]
-    SubscribeChunks { receiver_ids: Vec<AccountId> },
-    /// Unsubscribe from chunk stream
-    #[serde(rename = "unsubscribe_chunks")]
-    UnsubscribeChunks,
     /// Ping to keep connection alive
     #[serde(rename = "ping")]
     Ping,
@@ -77,27 +54,14 @@ pub enum WsResponse<'a> {
     /// Subscription confirmed
     #[serde(rename = "subscribed")]
     Subscribed { subscription_id: &'a str },
-    /// Chunk subscription confirmed
-    #[serde(rename = "chunk_subscribed")]
-    ChunkSubscribed { subscription_id: &'a str, receiver_ids: &'a [AccountId] },
     /// Unsubscription confirmed
     #[serde(rename = "unsubscribed")]
     Unsubscribed,
-    /// Chunk unsubscription confirmed
-    #[serde(rename = "chunk_unsubscribed")]
-    ChunkUnsubscribed,
     /// New block notification
     #[serde(rename = "block")]
     Block {
         block: BlockOut,
         /// Timestamp when the block was received by this node (unix millis)
-        received_at: u64,
-    },
-    /// New chunk notification (filtered by receiver ids)
-    #[serde(rename = "chunk")]
-    Chunk {
-        chunk: &'a ChunkView,
-        /// Timestamp when the chunk was received by this node (unix millis)
         received_at: u64,
     },
     /// Pong response
@@ -112,20 +76,15 @@ pub enum WsResponse<'a> {
 #[derive(Clone)]
 pub struct WsState {
     pub block_hub: Arc<BlockSubscriptionHub>,
-    pub chunk_hub: Option<Arc<ChunkSubscriptionHub>>,
 }
 
 /// Axum handler for WebSocket upgrade
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<WsState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.block_hub, state.chunk_hub))
+    ws.on_upgrade(move |socket| handle_socket(socket, state.block_hub))
 }
 
 /// Handle an individual WebSocket connection
-async fn handle_socket(
-    socket: WebSocket,
-    block_hub: Arc<BlockSubscriptionHub>,
-    chunk_hub: Option<Arc<ChunkSubscriptionHub>>,
-) {
+async fn handle_socket(socket: WebSocket, block_hub: Arc<BlockSubscriptionHub>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Generate a unique subscription ID
@@ -134,9 +93,6 @@ async fn handle_socket(
     // Subscribe to block updates
     let mut block_subscriber = block_hub.subscribe();
     let mut block_filters: HashSet<AccountId> = HashSet::new();
-    // Lazily create chunk subscriber when requested
-    let mut chunk_subscriber: Option<ChunkSubscriber> = None;
-    let mut chunk_filters: HashSet<AccountId> = HashSet::new();
 
     // Send subscription confirmation
     let response = WsResponse::Subscribed { subscription_id: &subscription_id };
@@ -185,45 +141,6 @@ async fn handle_socket(
                     }
                 }
             }
-            // Receive new chunk and push to client (when subscribed)
-            chunk_msg = async {
-                if let Some(sub) = chunk_subscriber.as_mut() {
-                    sub.recv().await
-                } else {
-                    future::pending().await
-                }
-            } => {
-                if let Some(chunk) = chunk_msg {
-                    if let Some(filtered_chunk) = filter_chunk(&chunk, &chunk_filters) {
-                        let received_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64;
-
-                        let response = WsResponse::Chunk { chunk: &filtered_chunk, received_at };
-                        match serde_json::to_string(&response) {
-                            Ok(json) => {
-                                if sender.send(Message::Text(json.into())).await.is_err() {
-                                    tracing::debug!(
-                                        target: "jsonrpc",
-                                        %subscription_id,
-                                        "Failed to send chunk, client disconnected"
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    target: "jsonrpc",
-                                    ?e,
-                                    "Failed to serialize chunk"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
             // Handle messages from client
             msg = receiver.next() => {
                 match msg {
@@ -247,39 +164,6 @@ async fn handle_socket(
                                     block_filters = receiver_ids.into_iter().collect();
                                     let response =
                                         WsResponse::Subscribed { subscription_id: &subscription_id };
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = sender.send(Message::Text(json.into())).await;
-                                    }
-                                }
-                                WsRequest::SubscribeChunks { receiver_ids } => {
-                                    let Some(chunk_hub) = &chunk_hub else {
-                                        send_error(&mut sender, "Chunk subscription not enabled").await;
-                                        continue;
-                                    };
-
-                                    let filters: HashSet<_> = receiver_ids.into_iter().collect();
-                                    if filters.is_empty() {
-                                        send_error(&mut sender, "receiver_ids must not be empty").await;
-                                        continue;
-                                    }
-
-                                    let response_ids: Vec<_> = filters.iter().cloned().collect();
-                                    chunk_filters = filters;
-                                    if chunk_subscriber.is_none() {
-                                        chunk_subscriber = Some(chunk_hub.subscribe());
-                                    }
-                                    let response = WsResponse::ChunkSubscribed {
-                                        subscription_id: &subscription_id,
-                                        receiver_ids: &response_ids,
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = sender.send(Message::Text(json.into())).await;
-                                    }
-                                }
-                                WsRequest::UnsubscribeChunks => {
-                                    chunk_subscriber = None;
-                                    chunk_filters.clear();
-                                    let response = WsResponse::ChunkUnsubscribed;
                                     if let Ok(json) = serde_json::to_string(&response) {
                                         let _ = sender.send(Message::Text(json.into())).await;
                                     }
@@ -328,42 +212,6 @@ async fn handle_socket(
     );
 }
 
-fn filter_chunk(chunk: &ChunkView, receiver_ids: &HashSet<AccountId>) -> Option<ChunkView> {
-    if receiver_ids.is_empty() {
-        return Some(ChunkView {
-            author: chunk.author.clone(),
-            header: chunk.header.clone(),
-            transactions: chunk.transactions.clone(),
-            receipts: chunk.receipts.clone(),
-        });
-    }
-
-    let transactions: Vec<_> = chunk
-        .transactions
-        .iter()
-        .filter(|tx| receiver_ids.contains(&tx.receiver_id))
-        .cloned()
-        .collect();
-
-    let receipts: Vec<_> = chunk
-        .receipts
-        .iter()
-        .filter(|rcpt| receiver_ids.contains(&rcpt.receiver_id))
-        .cloned()
-        .collect();
-
-    if transactions.is_empty() && receipts.is_empty() {
-        return None;
-    }
-
-    Some(ChunkView {
-        author: chunk.author.clone(),
-        header: chunk.header.clone(),
-        transactions,
-        receipts,
-    })
-}
-
 async fn send_error(sender: &mut (impl Sink<Message> + Unpin), message: &'static str) {
     if let Ok(json) = serde_json::to_string(&WsResponse::Error { message }) {
         let _ = sender.send(Message::Text(json.into())).await;
@@ -376,49 +224,22 @@ fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> 
         return None;
     }
 
-    let mut chunks_out = Vec::new();
-    for chunk in &block.chunks {
-        // Filter receipts first
-        let receipts_out: Vec<_> = chunk
-            .receipts
-            .iter()
-            .filter(|r| filters.contains(&r.receipt.receiver_id))
-            .map(|r| ReceiptOut {
-                receipt_id: r.receipt.receipt_id,
-                receiver_id: r.receipt.receiver_id.clone(),
-                status: r.status.clone(),
-            })
-            .collect();
+    let transactions: Vec<_> = block
+        .transactions
+        .iter()
+        .filter(|tx| filters.contains(&tx.receiver_id))
+        .map(|tx| TxOut {
+            hash: tx.hash,
+            receiver_id: tx.receiver_id.clone(),
+            signer_id: tx.signer_id.clone(),
+            actions: tx.actions.clone(),
+            status: tx.status.clone(),
+        })
+        .collect();
 
-        // Filter transactions strictly by receiver_id
-        let txs_out: Vec<_> = chunk
-            .transactions
-            .iter()
-            .filter(|tx| filters.contains(&tx.receiver_id))
-            .map(|tx| TxOut {
-                hash: tx.hash,
-                receiver_id: tx.receiver_id.clone(),
-                signer_id: tx.signer_id.clone(),
-                actions: tx.actions.clone(),
-                status: tx.status.clone(),
-            })
-            .collect();
-
-        if txs_out.is_empty() && receipts_out.is_empty() {
-            continue;
-        }
-
-        chunks_out.push(ChunkOut {
-            chunk_hash: chunk.chunk_hash.clone(),
-            shard_id: chunk.shard_id,
-            transactions: txs_out,
-            receipts: receipts_out,
-        });
-    }
-
-    if chunks_out.is_empty() {
+    if transactions.is_empty() {
         return None;
     }
 
-    Some(BlockOut { header: block.header.clone(), chunks: chunks_out })
+    Some(BlockOut { height: block.height, transactions })
 }

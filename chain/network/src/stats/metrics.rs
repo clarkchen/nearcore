@@ -431,9 +431,13 @@ fn record_routed_msg_latency(
     tier: tcp::Tier,
     fastest: bool,
 ) {
-    let Some(created_at) = msg.created_at() else { return; };
+    let Some(created_at) = msg.created_at() else {
+        return;
+    };
     let now = clock.now_utc().unix_timestamp();
-    let Some(duration) = now.checked_sub(created_at) else { return; };
+    let Some(duration) = now.checked_sub(created_at) else {
+        return;
+    };
     NETWORK_ROUTED_MSG_LATENCY
         .with_label_values(&[msg.body_variant(), tier.as_ref(), bool_to_str(fastest)])
         .observe(duration as f64);
