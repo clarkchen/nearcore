@@ -20,6 +20,8 @@ use std::sync::Arc;
 #[derive(Debug, Serialize)]
 pub struct BlockOut {
     height: BlockHeight,
+    hash: near_primitives::hash::CryptoHash,
+    timestamp_nanosec: u64,
     transactions: Vec<TxOut>,
 }
 
@@ -219,27 +221,29 @@ async fn send_error(sender: &mut (impl Sink<Message> + Unpin), message: &'static
 }
 
 fn build_filtered_block(block: &BlockPushView, filters: &HashSet<AccountId>) -> Option<BlockOut> {
-    // If no filters provided, do not push anything (avoid noisy defaults)
-    if filters.is_empty() {
-        return None;
-    }
+    let transactions: Vec<_> = if filters.is_empty() {
+        // If no filters provided, return empty transactions list but still push block
+        Vec::new()
+    } else {
+        // If filters provided, only include matching transactions
+        block
+            .transactions
+            .iter()
+            .filter(|tx| filters.contains(&tx.receiver_id))
+            .map(|tx| TxOut {
+                hash: tx.hash,
+                receiver_id: tx.receiver_id.clone(),
+                signer_id: tx.signer_id.clone(),
+                actions: tx.actions.clone(),
+                status: tx.status.clone(),
+            })
+            .collect()
+    };
 
-    let transactions: Vec<_> = block
-        .transactions
-        .iter()
-        .filter(|tx| filters.contains(&tx.receiver_id))
-        .map(|tx| TxOut {
-            hash: tx.hash,
-            receiver_id: tx.receiver_id.clone(),
-            signer_id: tx.signer_id.clone(),
-            actions: tx.actions.clone(),
-            status: tx.status.clone(),
-        })
-        .collect();
-
-    if transactions.is_empty() {
-        return None;
-    }
-
-    Some(BlockOut { height: block.height, transactions })
+    Some(BlockOut {
+        height: block.height,
+        hash: block.hash,
+        timestamp_nanosec: block.timestamp_nanosec,
+        transactions,
+    })
 }

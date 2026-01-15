@@ -1353,6 +1353,10 @@ impl From<GlobalContractIdentifierView> for GlobalContractIdentifier {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct BlockPushView {
     pub height: BlockHeight,
+    pub hash: CryptoHash,
+    #[serde(with = "dec_format")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub timestamp_nanosec: u64,
     pub transactions: Vec<TxPushView>,
 }
 

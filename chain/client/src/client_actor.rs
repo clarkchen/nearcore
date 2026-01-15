@@ -1678,7 +1678,12 @@ impl ClientActorInner {
             return None;
         }
 
-        Some(BlockPushView { height: block.header().height(), transactions: transactions_out })
+        Some(BlockPushView {
+            height: block.header().height(),
+            hash: *block.header().hash(),
+            timestamp_nanosec: block.header().raw_timestamp(),
+            transactions: transactions_out
+        })
     }
 
     fn receive_headers(&mut self, headers: Vec<Arc<BlockHeader>>, peer_id: PeerId) -> bool {
