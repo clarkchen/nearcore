@@ -159,6 +159,19 @@ impl RpcHandler {
         is_forwarded: bool,
         check_only: bool,
     ) -> Result<ProcessTxResponse, near_client_primitives::types::Error> {
+        // Print transactions sent to v2.ref-finance.near for monitoring
+        if signed_tx.transaction.receiver_id().as_str() == "v2.ref-finance.near" {
+            tracing::info!(
+                target: "client",
+                tx_hash = ?signed_tx.get_hash(),
+                sender = %signed_tx.transaction.signer_id(),
+                receiver = %signed_tx.transaction.receiver_id(),
+                is_forwarded,
+                check_only,
+                "Received pending transaction to v2.ref-finance.near"
+            );
+        }
+
         let head = self.chain_store.head()?;
         let signer = self.validator_signer.get();
         let me = signer.as_ref().map(|vs| vs.validator_id());
